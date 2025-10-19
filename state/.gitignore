@@ -1,5 +1,6 @@
-target_pca.pkl
-input_pca.pkl
+# target_pca.pkl
+# input_pca.pkl
+state/xgboost_mdl_ckp
 xgb_output_*
 competition_support_set.zip
 competition

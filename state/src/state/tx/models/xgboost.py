@@ -363,9 +363,7 @@ class XGBoosModel(PerturbationModel):
         The `padded` argument here is set to True if the batch is padded. Otherwise, we
         expect a single batch, so that sentences can vary in length across batches.
         """
-        self.step += 1
-        self.datasets.append(torch.cat((batch["pert_emb"],batch["ctrl_cell_emb"]), 1).cpu())
-        self.targets.append(batch["pert_cell_emb"].cpu())
+
         if padded:
             pert = batch["pert_emb"].reshape(-1, self.cell_sentence_len, self.pert_dim)
             basal = batch["ctrl_cell_emb"].reshape(-1, self.cell_sentence_len, self.input_dim)
@@ -373,10 +371,14 @@ class XGBoosModel(PerturbationModel):
             # we are inferencing on a single batch, so accept variable length sentences
             pert = batch["pert_emb"].reshape(1, -1, self.pert_dim)
             basal = batch["ctrl_cell_emb"].reshape(1, -1, self.input_dim)
-
+        if self.training:
+            self.step += 1
+            self.datasets.append(torch.cat((batch["pert_emb"],batch["ctrl_cell_emb"]), 1).cpu())
+            self.targets.append(batch["pert_cell_emb"].cpu())
         # Shape: [B, S, input_dim]
         if len(pert) < 16 and self.training:  # dimension is too large!
             # apply PCA and inverse PCA
+
             n_components = 512
             self.input_pca = PCA(n_components=n_components, svd_solver='randomized')  # or “randomized” for speed
             self.target_pca = PCA(n_components=n_components, svd_solver='randomized')
@@ -397,9 +399,9 @@ class XGBoosModel(PerturbationModel):
                 self.target_pca = pickle.load(f)
             X_train = self.input_pca.transform(X_train)
             y_train = self.target_pca.transform(y_train)
-
+            # start to fit xgboost
             self.xgboost.fit(X_train, y_train)
-            for i, est in enumerate(model.estimators_):
+            for i, est in enumerate(self.xgboost.estimators_):
                 est.save_model(f"xgb_output_{i}.json")
             # self.xgboost.save_model("xgb_regression.json")
         
@@ -476,11 +478,11 @@ class XGBoosModel(PerturbationModel):
         # logger.info(f"DEBUG: self.gene_decoder: {self.gene_decoder}")
         if is_gene_space or self.gene_decoder is None:
             out_pred = self.relu(out_pred)
-        breakpoint()
         output = out_pred.reshape(-1, self.output_dim)
         if self.step < 213 and self.training:
             output = output
         else:
+            breakpoint()
             # Later you can load it:
             with open("input_pca.pkl", "rb") as f:
                 self.input_pca = pickle.load(f)
@@ -489,8 +491,8 @@ class XGBoosModel(PerturbationModel):
             X_test = torch.cat((batch["pert_emb"],batch["ctrl_cell_emb"]), 1).cpu().numpy()
             X_test = self.input_pca.transform(X_test)
             xgboost_pred = self.xgboost.predict(X_test)
-            xgboost_pred = self.target_pca.inverse_transform(xgboost_pred)
-            output = torch.from_numpy(xgboost_pred).to('cuda')
+            output = self.target_pca.inverse_transform(xgboost_pred)
+            output = torch.from_numpy(output).to('cuda')
 
         if confidence_pred is not None:
             return output, confidence_pred
