@@ -1,6 +1,8 @@
+from tabpfn import TabPFNRegressor
+
 import logging
 from typing import Dict, Optional
-import os
+
 import anndata as ad
 import numpy as np
 import torch
@@ -13,11 +15,8 @@ from .base import PerturbationModel
 from .decoders import FinetuneVCICountsDecoder
 from .decoders_nb import NBDecoder, nb_nll
 from .utils import build_mlp, get_activation_class, get_transformer_backbone, apply_lora
-
-from sklearn.multioutput import MultiOutputRegressor
-from xgboost import XGBRegressor
-from sklearn.decomposition import PCA
-import pickle  # for saving models
+import pickle
+from tqdm import tqdm
 
 logger = logging.getLogger(__name__)
 
@@ -102,8 +101,8 @@ class ConfidenceToken(nn.Module):
         return main_output, confidence_pred
 
 
+class TabPFNModel(PerturbationModel):
 # class StateTransitionPerturbationModel(PerturbationModel):
-class XGBoosModel(PerturbationModel):
     """
     This model:
       1) Projects basal expression and perturbation encodings into a shared latent space.
@@ -164,7 +163,7 @@ class XGBoosModel(PerturbationModel):
         self.transformer_backbone_key = transformer_backbone_key
         self.transformer_backbone_kwargs = transformer_backbone_kwargs
         self.transformer_backbone_kwargs["n_positions"] = self.cell_sentence_len + kwargs.get("extra_tokens", 0)
-
+        
         self.distributional_loss = distributional_loss
         self.gene_dim = gene_dim
 
@@ -263,57 +262,59 @@ class XGBoosModel(PerturbationModel):
                 genes=gene_names,
                 # latent_dim=self.output_dim + (self.batch_dim or 0),
             )
-        self.datasets = []
-        self.targets = []
-        self.step = -2  # 2 steps sanity check
         print(self)
 
     def _build_networks(self, lora_cfg=None):
         """
         Here we instantiate the actual GPT2-based model.
         """
-        base = XGBRegressor(objective="reg:squarederror", n_estimators=100)
-        self.xgboost = MultiOutputRegressor(base)
-        
-        if os.path.exists("xgb_regression.json"):
-            self.xgboost.load_model("xgb_regression.json")
-        # Reconstruct wrapper
-        # model = MultiOutputRegressor(XGBRegressor())
-        if os.path.exists("xgb_output_0.json"):
-            # Load each estimator back
-            self.xgboost.estimators_ = []
-            num_outputs = 512
-            for i in range(num_outputs):
-                est = XGBRegressor()
-                est.load_model(f"xgb_output_{i}.json")
-                self.xgboost.estimators_.append(est)
-        # self.xgboost.save_model("xgb_regression.json")
-        self.pert_encoder = build_mlp(
-            in_dim=self.pert_dim,
-            out_dim=self.hidden_dim,
-            hidden_dim=self.hidden_dim,
-            n_layers=self.n_encoder_layers,
+        self.step = 0
+        self.models = []
+        self.datasets = []
+        self.targets = []
+        self.tabpfn_context_X = nn.Parameter(torch.randn(2048, 512)).to('cuda')  # 18080 + 5120
+        self.tabpfn_context_Y = nn.Parameter(torch.randn(2048, 512)).to('cuda')  # 512
+        self.tabpfn_mdl = TabPFNRegressor(device='cuda',ignore_pretraining_limits=True)
+        self.tabpfn_pseudo_train_layer = build_mlp(
+            in_dim=18080 + 5120,
+            out_dim=18080,
+            hidden_dim=64,
+            n_layers=2,
             dropout=self.dropout,
             activation=self.activation_class,
         )
+        # nn.Linear(18080 + 5120, 18080)
+        # self.tabicl_mdl = TabICLClassifier(device='cuda')
+        # Project from input_dim to hidden_dim for transformer input
+        # self.project_to_hidden = nn.Linear(self.input_dim, self.hidden_dim)
+        # self.pert_y_encoder = nn.Linear(self.input_dim, 512)  # self.hidden_dim) C*E where C is the number of class tokens, E is the embedding dimension
+
+        # self.pert_encoder = build_mlp(
+        #     in_dim=self.pert_dim,
+        #     out_dim=self.hidden_dim,
+        #     hidden_dim=self.hidden_dim,
+        #     n_layers=self.n_encoder_layers,
+        #     dropout=self.dropout,
+        #     activation=self.activation_class,
+        # )
 
         # Simple linear layer that maintains the input dimension
-        if self.use_basal_projection:
-            self.basal_encoder = build_mlp(
-                in_dim=self.input_dim,
-                out_dim=self.hidden_dim,
-                hidden_dim=self.hidden_dim,
-                n_layers=self.n_encoder_layers,
-                dropout=self.dropout,
-                activation=self.activation_class,
-            )
-        else:
-            self.basal_encoder = nn.Linear(self.input_dim, self.hidden_dim)
+        # if self.use_basal_projection:
+        #     self.basal_encoder = build_mlp(
+        #         in_dim=self.input_dim,
+        #         out_dim=self.hidden_dim,
+        #         hidden_dim=self.hidden_dim,
+        #         n_layers=self.n_encoder_layers,
+        #         dropout=self.dropout,
+        #         activation=self.activation_class,
+        #     )
+        # else:
+        #     self.basal_encoder = nn.Linear(self.input_dim, self.hidden_dim)
 
-        self.transformer_backbone, self.transformer_model_dim = get_transformer_backbone(
-            self.transformer_backbone_key,
-            self.transformer_backbone_kwargs,
-        )
+        # self.transformer_backbone, self.transformer_model_dim = get_transformer_backbone(
+        #     self.transformer_backbone_key,
+        #     self.transformer_backbone_kwargs,
+        # )
 
         # Optionally wrap backbone with LoRA adapters
         if lora_cfg and lora_cfg.get("enable", False):
@@ -326,21 +327,21 @@ class XGBoosModel(PerturbationModel):
         # Project from input_dim to hidden_dim for transformer input
         # self.project_to_hidden = nn.Linear(self.input_dim, self.hidden_dim)
 
-        self.project_out = build_mlp(
-            in_dim=self.hidden_dim,
-            out_dim=self.output_dim,
-            hidden_dim=self.hidden_dim,
-            n_layers=self.n_decoder_layers,
-            dropout=self.dropout,
-            activation=self.activation_class,
-        )
+        # self.project_out = build_mlp(
+        #     in_dim=512,  # self.hidden_dim,
+        #     out_dim=self.output_dim,
+        #     hidden_dim=self.hidden_dim,
+        #     n_layers=self.n_decoder_layers,
+        #     dropout=self.dropout,
+        #     activation=self.activation_class,
+        # )
 
-        if self.output_space == "all":
-            self.final_down_then_up = nn.Sequential(
-                nn.Linear(self.output_dim, self.output_dim // 8),
-                nn.GELU(),
-                nn.Linear(self.output_dim // 8, self.output_dim),
-            )
+        # if self.output_space == "all":
+        #     self.final_down_then_up = nn.Sequential(
+        #         nn.Linear(self.output_dim, self.output_dim // 8),
+        #         nn.GELU(),
+        #         nn.Linear(self.output_dim // 8, self.output_dim),
+        #     )
 
     def encode_perturbation(self, pert: torch.Tensor) -> torch.Tensor:
         """If needed, define how we embed the raw perturbation input."""
@@ -363,54 +364,26 @@ class XGBoosModel(PerturbationModel):
         The `padded` argument here is set to True if the batch is padded. Otherwise, we
         expect a single batch, so that sentences can vary in length across batches.
         """
+        # if padded:
+        #     pert = batch["pert_emb"].reshape(-1, self.cell_sentence_len, self.pert_dim)
+        #     basal = batch["ctrl_cell_emb"].reshape(-1, self.cell_sentence_len, self.input_dim)
+        # else:
+        #     # we are inferencing on a single batch, so accept variable length sentences
+        #     pert = batch["pert_emb"].reshape(1, -1, self.pert_dim)
+        #     basal = batch["ctrl_cell_emb"].reshape(1, -1, self.input_dim)
 
-        if padded:
-            pert = batch["pert_emb"].reshape(-1, self.cell_sentence_len, self.pert_dim)
-            basal = batch["ctrl_cell_emb"].reshape(-1, self.cell_sentence_len, self.input_dim)
-        else:
-            # we are inferencing on a single batch, so accept variable length sentences
-            pert = batch["pert_emb"].reshape(1, -1, self.pert_dim)
-            basal = batch["ctrl_cell_emb"].reshape(1, -1, self.input_dim)
         if self.training:
             self.step += 1
-            self.datasets.append(torch.cat((batch["pert_emb"],batch["ctrl_cell_emb"]), 1).cpu())
-            self.targets.append(batch["pert_cell_emb"].cpu())
+            if len(batch["pert_emb"]) * (len(self.datasets)) < 10000:
+                self.datasets.append(torch.cat((batch["pert_emb"],batch["ctrl_cell_emb"]), 1).cpu())
+                self.targets.append(batch["pert_cell_emb"].cpu())
         # Shape: [B, S, input_dim]
-        if len(pert) < 16 and self.training:  # dimension is too large!
-            # apply PCA and inverse PCA
-
-            n_components = 512
-            self.input_pca = PCA(n_components=n_components, svd_solver='randomized')  # or “randomized” for speed
-            self.target_pca = PCA(n_components=n_components, svd_solver='randomized')
-            X_train = torch.cat(self.datasets, 0).numpy()
-            y_train = torch.cat(self.targets, 0).numpy()
-            # self.input_pca.fit(X_train)
-            # self.target_pca.fit(y_train)
-
-            # # 4. Save the PCA model (which includes components, mean, etc.)
-            # with open("input_pca.pkl", "wb") as f:
-            #     pickle.dump(self.input_pca, f)
-            # with open("target_pca.pkl", "wb") as f:
-            #     pickle.dump(self.target_pca, f)
-
-            with open("input_pca.pkl", "rb") as f:
-                self.input_pca = pickle.load(f)
-            with open("target_pca.pkl", "rb") as f:
-                self.target_pca = pickle.load(f)
-            X_train = self.input_pca.transform(X_train)
-            y_train = self.target_pca.transform(y_train)
-            # start to fit xgboost
-            self.xgboost.fit(X_train, y_train)
-            for i, est in enumerate(self.xgboost.estimators_):
-                est.save_model(f"xgb_output_{i}.json")
-            # self.xgboost.save_model("xgb_regression.json")
-        
-        pert_embedding = self.encode_perturbation(pert)
-        
-        control_cells = self.encode_basal_expression(basal)
+        # pert_embedding = self.encode_perturbation(pert)  # 5120 -> 672
+        # control_cells = self.encode_basal_expression(basal)  # 18080 -> 672
 
         # Add encodings in input_dim space, then project to hidden_dim
-        combined_input = pert_embedding + control_cells  # Shape: [B, S, hidden_dim]
+        combined_input = torch.cat((batch["pert_emb"],batch["ctrl_cell_emb"]), 1)
+        # combined_input = pert_embedding + control_cells  # Shape: [B, S, hidden_dim]. # QH: later try concate
         seq_input = combined_input  # Shape: [B, S, hidden_dim] 672
 
         if self.batch_encoder is not None:
@@ -435,7 +408,7 @@ class XGBoosModel(PerturbationModel):
         if self.confidence_token is not None:
             # Append confidence token: [B, S, E] -> [B, S+1, E]
             seq_input = self.confidence_token.append_confidence_token(seq_input)
-    
+
         # forward pass + extract CLS last hidden state
         if self.hparams.get("mask_attn", False):  # skip
             batch_size, seq_length, _ = seq_input.shape
@@ -446,58 +419,92 @@ class XGBoosModel(PerturbationModel):
             # create a [1,1,S,S] mask (now S+1 if confidence token is used)
             base = torch.eye(seq_length, device=device).view(1, seq_length, seq_length)
 
-            # repeat out to [B,H,S,S] 
+            # repeat out to [B,H,S,S]
             attn_mask = base.repeat(batch_size, 1, 1)
 
             outputs = self.transformer_backbone(inputs_embeds=seq_input, attention_mask=attn_mask)
             transformer_output = outputs.last_hidden_state
         else:
-            transformer_output = seq_input # self.transformer_backbone(inputs_embeds=seq_input).last_hidden_state
+            # transformer_output = self.transformer_backbone(inputs_embeds=seq_input).last_hidden_state
+            # seq_input = torch.randn(3, self.cell_sentence_len, self.hidden_dim).to('cuda')
+            X = seq_input  # .flatten(0, 1)
+            # breakpoint()
+            # Column-wise embedding -> Row-wise interaction
+            # RuntimeError: Sizes of tensors must match except in dimension 1. Expected size 16 but got size 3 for tensor number 1 in the list.
+            # if seq_input.shape[0] < 2048: 
+            #     X = X.view(16, -1, self.hidden_dim)
+            B, H = X.shape
+            ##### apply PCA to map 
+            #  *** ValueError: Number of features 23200 in the input data is greater than the maximum number of features 500 
+            #  officially supported by the TabPFN model. Set `ignore_pretraining_limits=True` to override this error!
+            
 
-        # Extract confidence prediction if confidence token was used
-        if self.confidence_token is not None:   # skip
-            res_pred, confidence_pred = self.confidence_token.extract_confidence_prediction(transformer_output)
-        else:
-            res_pred = transformer_output
+                # self.tabpfn_mdl.fit(self.tabpfn_context_X.cpu(), self.tabpfn_context_Y[:, i].cpu())  
+                # output_i, _, _ = self.tabpfn_mdl.forward(X)
+                # outputs.append(output_i)
+            
+            # X_tabpfn = torch.from_numpy(X[:, :pca_dim]).to('cuda')
+            
 
-        # add to basal if predicting residual
-        if self.predict_residual and self.output_space == "all":
-            # Project control_cells to hidden_dim space to match res_pred
-            # control_cells_hidden = self.project_to_hidden(control_cells)
-            # treat the actual prediction as a residual sum to basal
-            out_pred = self.project_out(res_pred) + basal  # [16, 128, 18080]
-            out_pred = self.final_down_then_up(out_pred)
-        elif self.predict_residual:
-            out_pred = self.project_out(res_pred + control_cells)
-        else:
-            out_pred = self.project_out(res_pred)
 
-        # apply relu if specified and we output to HVG space
-        is_gene_space = self.hparams["embed_key"] == "X_hvg" or self.hparams["embed_key"] is None
-        # logger.info(f"DEBUG: is_gene_space: {is_gene_space}")
-        # logger.info(f"DEBUG: self.gene_decoder: {self.gene_decoder}")
-        if is_gene_space or self.gene_decoder is None:
-            out_pred = self.relu(out_pred)
-        output = out_pred.reshape(-1, self.output_dim)
-        if self.step < 213 and self.training:
-            output = output
+
+            # if self.training and seq_input.shape[0] == 16:
+            #     self.tabicl_context_X = X.detach()
+            #     self.tabicl_context_Y = batch["pert_cell_emb"].reshape(-1, self.cell_sentence_len, self.output_dim).detach()
+            # if seq_input.shape[0] < 16:
+            #     src = src.reshape(-1,  self.cell_sentence_len, 512)
+        pca_dim = 32  # 32
+        if self.step < 213: #  and self.training:
+            output = None
+        elif self.training:
+            X = seq_input 
+
+            if self.models == []:
+                X_train = torch.cat(self.datasets, 0).numpy()[:10000]
+                y_train = torch.cat(self.targets, 0).numpy()[:10000]
+                with open("input_pca.pkl", "rb") as f:
+                    self.input_pca = pickle.load(f)
+                with open("target_pca.pkl", "rb") as f:
+                    self.target_pca = pickle.load(f)
+                X_train = self.input_pca.transform(X_train)
+                y_train = self.target_pca.transform(y_train)
+                
+                for i in tqdm(range(self.tabpfn_context_Y.shape[-1])):
+                    reg = TabPFNRegressor(device="cuda")      # GPU-backed model
+                    reg.fit(X_train[:, :pca_dim], y_train[:, i])                     # fast(-er) context fit
+                    self.models.append(reg)
+            output = None
         else:
-            breakpoint()
-            # Later you can load it:
-            with open("input_pca.pkl", "rb") as f:
-                self.input_pca = pickle.load(f)
-            with open("target_pca.pkl", "rb") as f:
-                self.target_pca = pickle.load(f)
-            X_test = torch.cat((batch["pert_emb"],batch["ctrl_cell_emb"]), 1).cpu().numpy()
-            X_test = self.input_pca.transform(X_test)
-            xgboost_pred = self.xgboost.predict(X_test)
-            output = self.target_pca.inverse_transform(xgboost_pred)
+            X = seq_input 
+            X = self.input_pca.transform(X.cpu())
+            preds = [] 
+            for mdl in tqdm(self.models):
+                preds.append(mdl.predict(X[:, :pca_dim]).reshape(-1, 1))
+                
+            outputs = np.concatenate(preds, -1)
+            output = self.target_pca.inverse_transform(outputs)
             output = torch.from_numpy(output).to('cuda')
 
-        if confidence_pred is not None:
-            return output, confidence_pred
+        # apply relu if specified and we output to HVG space
+        # is_gene_space = self.hparams["embed_key"] == "X_hvg" or self.hparams["embed_key"] is None
+        # logger.info(f"DEBUG: is_gene_space: {is_gene_space}")
+        # logger.info(f"DEBUG: self.gene_decoder: {self.gene_decoder}")
+
+        # if self.training:
+        #     output = self.tabpfn_pseudo_train_layer(combined_input)
+        # else:
+        #     output = out_pred.reshape(-1, self.output_dim)
+
+        # if confidence_pred is not None:
+        #     return output, confidence_pred
+        # else:
+        #     return output
+        if output == None:
+             pseudo_output = self.tabpfn_pseudo_train_layer(combined_input)
+             return pseudo_output
         else:
             return output
+        
 
     def training_step(self, batch: Dict[str, torch.Tensor], batch_idx: int, padded=True) -> torch.Tensor:
         """Training step logic for both main model and decoder."""
@@ -520,7 +527,6 @@ class XGBoosModel(PerturbationModel):
         main_loss = self.loss_fn(pred, target).nanmean()  # both: [16, 128, 18080]
         self.log("train_loss", main_loss)
         print("train_loss", main_loss)
-        # breakpoint()
         # Log individual loss components if using combined loss
         if hasattr(self.loss_fn, "sinkhorn_loss") and hasattr(self.loss_fn, "energy_loss"):
             sinkhorn_component = self.loss_fn.sinkhorn_loss(pred, target).nanmean()

@@ -4,7 +4,11 @@ state/xgb_output_*
 state/competition_support_set.zip
 state/competition
 state/competition_support_set
+state/competition_support_set_ext
 state/wandb/
 state/wandb_logs
 state/.venv/
 state/assets/
+genes_nucleotides.fasta
+genes_proteins.fasta
+pert_genes.pkl
