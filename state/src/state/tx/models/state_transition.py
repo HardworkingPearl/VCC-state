@@ -339,9 +339,10 @@ class StateTransitionPerturbationModel(PerturbationModel):
         The `padded` argument here is set to True if the batch is padded. Otherwise, we
         expect a single batch, so that sentences can vary in length across batches.
         """
-        # breakpoint() np.where(np.array(batch['pert_name'])==np.str_('non-targeting'))
+        breakpoint() # np.where(np.array(batch['pert_name'])==np.str_('non-targeting'))
+        batch["pert_emb"] = torch.stack(batch["pert_emb"]).to(batch["ctrl_cell_emb"].device)
         if padded:
-            pert = batch["pert_emb"].reshape(-1, self.cell_sentence_len, self.pert_dim)
+            pert = batch["pert_emb"].reshape(-1, self. cell_sentence_len, self.pert_dim)
             basal = batch["ctrl_cell_emb"].reshape(-1, self.cell_sentence_len, self.input_dim)
         else:
             # we are inferencing on a single batch, so accept variable length sentences

@@ -5,6 +5,7 @@ state/competition_support_set.zip
 state/competition
 state/competition_support_set
 state/competition_support_set_ext
+state/competition_support_set*
 state/wandb/
 state/wandb_logs
 state/.venv/

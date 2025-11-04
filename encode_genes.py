@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+
+# flash-attn 2.8.3+computecanada requires torch~=2.7.0, but you have torch 2.6.0+computecanada which is incompatible.                    
+# torchvision 0.22.1+computecanada requires torch==2.7.1, but you have torch 2.6.0+computecanada which is incompatible.  
 import os
 import requests
 import time
@@ -9,7 +12,7 @@ from Bio import SeqIO
 import pickle
 import esm  # pip install fair-esm
 # For Evo2: you may need to pip install evo2 or use transformers depending on version
-# pip install evo2  (or from GitHub)  :contentReference[oaicite:3]{index=3}
+# pip install evo2  (or from GitHub) 
 from tqdm import tqdm 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -52,7 +55,7 @@ def fetch_uniprot_fasta(gene_symbol):
 
 def build_protein_fasta(gene_list, output_path):
     with open(output_path, "w") as fw:
-        for gene in gene_list:
+        for gene in tqdm(gene_list):
             try:
                 fasta = fetch_uniprot_fasta(gene)
                 fw.write(fasta)
@@ -181,7 +184,7 @@ def encode_with_esm2(fasta_path, model_name="esm2_t33_650M_UR50D", device=None):
     embeddings = {}
     records = list(SeqIO.parse(fasta_path, "fasta"))
     batch_size = 8
-    for i in range(0, len(records), batch_size):
+    for i in tqdm(range(0, len(records), batch_size)):
         batch_records = records[i : i + batch_size]
         batch = [(rec.id, str(rec.seq)) for rec in batch_records]
         labels, seqs, toks = batch_converter(batch)
@@ -197,21 +200,23 @@ def encode_with_esm2(fasta_path, model_name="esm2_t33_650M_UR50D", device=None):
     return embeddings
 
 # -------- STEP 3: Encode nucleotides with Evo2 --------
-def encode_with_evo2(fasta_path, model_name="evo2_7b", device=None):
+def encode_with_evo2(fasta_path, model_name="evo2_1b_base", device=None):  # "evo2_7b" / "evo2_1b_base"
     logger.info(f"Loading Evo2 model: {model_name}")
-    # Example from Evo2 docs. :contentReference[oaicite:4]{index=4}
+    # Example from Evo2 docs.
     from evo2 import Evo2
     evo_model = Evo2(model_name)
+    layer_name = 'blocks.22.post_norm' # 'blocks.28.post_norm'
     device = device or torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    evo_model = evo_model.to(device)
+    evo_model = evo_model  # .to(device)
     embeddings = {}
-    for rec in SeqIO.parse(fasta_path, "fasta"):
+    breakpoint()
+    for rec in tqdm(SeqIO.parse(fasta_path, "fasta")):
         seq = str(rec.seq).upper().replace("U", "T")
         input_ids = torch.tensor(evo_model.tokenizer.tokenize(seq), dtype=torch.int64).unsqueeze(0).to(device)
         with torch.no_grad():
-            outputs = evo_model(input_ids, return_embeddings=True)
+            outputs, embeddings = evo_model(input_ids,return_embeddings=True, layer_names=[layer_name]) #  evo_model(input_ids, return_embeddings=False)
         # Choose the layer or embedding you want — example: last_hidden_state mean
-        hidden = outputs.last_hidden_state  # shape [1, L, D]
+        hidden = embeddings[layer_name] # outputs[0][0]  # .last_hidden_state  # shape [1, L, D]
         embed = hidden.mean(dim=1).cpu().squeeze(0)  # [D]
         embeddings[rec.id] = embed
     return embeddings
@@ -221,14 +226,17 @@ if __name__ == "__main__":
     # Step 1A: protein FASTA
     # build_protein_fasta(GENES, OUTPUT_FASTA_PROTEIN)
     # Step 1B: nucleotide FASTA (you must implement fetch_nucleotide_fasta)
-    build_nuc_fasta(GENES, OUTPUT_FASTA_NUC)
+    # build_nuc_fasta(GENES, OUTPUT_FASTA_NUC)
     # Step 2: encode proteins
+    """
     prot_embeds = encode_with_esm2(OUTPUT_FASTA_PROTEIN)
     torch.save(prot_embeds, EMBED_OUT_PROTEIN)
     logger.info(f"Protein embeddings saved to {EMBED_OUT_PROTEIN}")
+    """
 
     # Step 3: encode nucleotides
-    nuc_embeds = encode_with_evo2(OUTPUT_FASTA_NUC)
+    nuc_embeds = encode_with_evo2(OUTPUT_FASTA_NUC)  # observations: 1. 43.75 large magnitute! 
+    breakpoint()
     torch.save(nuc_embeds, EMBED_OUT_NUC)
     logger.info(f"Nucleotide embeddings saved to {EMBED_OUT_NUC}")
 
