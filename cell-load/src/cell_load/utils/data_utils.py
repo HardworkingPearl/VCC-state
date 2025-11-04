@@ -13,7 +13,7 @@ log = logging.getLogger(__name__)
 
 warnings.filterwarnings("ignore")
 
-
+############## cell_load/utils/data_utils.py
 class H5MetadataCache:
     """Cache for H5 file metadata to avoid repeated disk reads."""
 
@@ -36,37 +36,90 @@ class H5MetadataCache:
         self.h5_path = h5_path
         with h5py.File(h5_path, "r") as f:
             obs = f["obs"]
-
             # -- Categories --
-            self.pert_categories = safe_decode_array(obs[pert_col]["categories"][:])
-            self.cell_type_categories = safe_decode_array(
-                obs[cell_type_key]["categories"][:]
-            )
-
-            # -- Batch: handle categorical vs numeric storage --
-            batch_ds = obs[batch_col]
-            if "categories" in batch_ds:
-                self.batch_is_categorical = True
-                self.batch_categories = safe_decode_array(batch_ds["categories"][:])
-                self.batch_codes = batch_ds["codes"][:].astype(np.int32)
-            else:
-                self.batch_is_categorical = False
-                raw = batch_ds[:]
-                self.batch_categories = raw.astype(str)
-                self.batch_codes = raw.astype(np.int32)
-
-            # -- Codes for pert & cell type --
-            self.pert_codes = obs[pert_col]["codes"][:].astype(np.int32)
-            self.cell_type_codes = obs[cell_type_key]["codes"][:].astype(np.int32)
-
-            # -- Control mask & counts --
-            idx = np.where(self.pert_categories == control_pert)[0]
-            if idx.size == 0:
-                raise ValueError(
-                    f"control_pert='{control_pert}' not found in {pert_col} categories"
+            ### TODO: SJQ + a dataset branch
+            if "pbmcs" in h5_path:
+                self.pert_categories = safe_decode_array(obs['cytokine/categories'][:])
+                self.cell_type_categories = safe_decode_array(
+                    obs[cell_type_key]["categories"][:]
                 )
-            self.control_pert_code = int(idx[0])
-            self.control_mask = self.pert_codes == self.control_pert_code
+                batch_ds = obs["sample"]
+                if "categories" in batch_ds:
+                    self.batch_is_categorical = True
+                    self.batch_categories = safe_decode_array(batch_ds["categories"][:])
+                    self.batch_codes = batch_ds["codes"][:].astype(np.int32)
+                else:
+                    self.batch_is_categorical = False
+                    raw = batch_ds[:]
+                    self.batch_categories = raw.astype(str)
+                    self.batch_codes = raw.astype(np.int32)
+                # -- Codes for pert & cell type --
+                self.pert_codes = obs['cytokine']["codes"][:].astype(np.int32)
+                self.cell_type_codes = obs[cell_type_key]["codes"][:].astype(np.int32)
+                # -- Control mask & counts --
+                idx = np.where(self.pert_categories == "PBS")[0]
+                if idx.size == 0:
+                    raise ValueError(
+                        f"control_pert='{control_pert}' not found in {pert_col} categories"
+                    )
+                self.control_pert_code = int(idx[0])
+                self.control_mask = self.pert_codes == self.control_pert_code
+            elif "Seurat" in h5_path:
+
+                # self.pert_categories = safe_decode_array(set(obs['gene'][:]))
+                # self.cell_type_categories = safe_decode_array(
+                #     set(obs[cell_type_key][:])
+                # )
+                self.pert_categories, self.pert_codes = np.unique(obs['gene'][:], return_inverse=True)
+                self.cell_type_categories, self.cell_type_codes = np.unique(obs[cell_type_key][:], return_inverse=True)
+                
+                self.batch_categories, self.batch_codes = np.unique(obs['Batch_info'][:], return_inverse=True)
+                self.batch_is_categorical = True
+                # raw = batch_ds[:]
+                # self.batch_categories = raw.astype(str)
+                # self.batch_codes = raw # .astype(np.int32)
+                # -- Codes for pert & cell type --
+                # self.pert_codes = obs['gene'][:]  # .astype(np.int32)
+                # self.cell_type_codes = obs[cell_type_key][:] # .astype(np.int32)
+
+                # -- Control mask & counts --
+                idx = np.where(self.pert_categories == b"NT")[0]
+                if idx.size == 0:
+                    raise ValueError(
+                        f"control_pert='{control_pert}' not found in {pert_col} categories"
+                    )
+                self.control_pert_code = int(idx[0])
+                self.control_mask = self.pert_codes == self.control_pert_code
+            else:
+                self.pert_categories = safe_decode_array(obs[pert_col]["categories"][:])
+                self.cell_type_categories = safe_decode_array(
+                    obs[cell_type_key]["categories"][:]
+                )
+
+                # -- Batch: handle categorical vs numeric storage --
+                batch_ds = obs[batch_col]
+                if "categories" in batch_ds:
+                    self.batch_is_categorical = True
+                    self.batch_categories = safe_decode_array(batch_ds["categories"][:])
+                    self.batch_codes = batch_ds["codes"][:].astype(np.int32)
+                else:
+                    self.batch_is_categorical = False
+                    raw = batch_ds[:]
+                    self.batch_categories = raw.astype(str)
+                    self.batch_codes = raw.astype(np.int32)
+
+                # -- Codes for pert & cell type --
+                self.pert_codes = obs[pert_col]["codes"][:].astype(np.int32)
+                self.cell_type_codes = obs[cell_type_key]["codes"][:].astype(np.int32)
+
+                # -- Control mask & counts --
+                idx = np.where(self.pert_categories == control_pert)[0]
+                if idx.size == 0:
+                    raise ValueError(
+                        f"control_pert='{control_pert}' not found in {pert_col} categories"
+                    )
+                self.control_pert_code = int(idx[0])
+                self.control_mask = self.pert_codes == self.control_pert_code
 
             self.n_cells = len(self.pert_codes)
 
@@ -300,12 +353,11 @@ def is_on_target_knockdown(
         control_cells = (adata.obs[perturbation_column] == control_label).values
         control_mean = _mean(X[control_cells, gene_idx])
 
-    if np.isclose(control_mean, 0.0):
-        log.warning(
-            "Skipping perturbation %r: control mean expression is zero; cannot compute knock-down ratio.",
-            target_gene,
+    if control_mean == 0:
+        raise ValueError(
+            f"Mean {target_gene!r} expression in control cells is zero; "
+            "cannot compute knock-down ratio."
         )
-        return False
 
     try:
         perturbed_mean = _mean(X[perturbed_cells, gene_idx])
@@ -383,19 +435,16 @@ def filter_on_target_knockdown(
                 print(control_cells.shape, control_cells)
                 print(gene_idx)
                 print(X[control_cells, gene_idx].shape)
+            if ctrl_mean == 0:
+                raise ValueError(
+                    f"Mean {pert!r} expression in control cells is zero; "
+                    "cannot compute knock-down ratio."
+                )
             control_mean_cache[pert] = ctrl_mean
         else:
             ctrl_mean = control_mean_cache[pert]
 
         pert_cells = (perts == pert).values
-
-        if np.isclose(ctrl_mean, 0.0):
-            log.warning(
-                "Skipping cell-level filtering for perturbation %r because control mean expression is zero.",
-                pert,
-            )
-            keep_mask[pert_cells] = False
-            continue
         # FIX: Replace .A1 with .toarray().flatten() for scipy sparse matrices
         expr_vals = (
             X[pert_cells, gene_idx].toarray().flatten()
