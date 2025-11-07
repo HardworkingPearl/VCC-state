@@ -47,6 +47,8 @@ python -m src.state tx train data.kwargs.toml_config_path="competition_support_s
 python -m src.state tx train data.kwargs.toml_config_path="competition_support_set/starter.toml"   data.kwargs.num_workers=4   data.kwargs.batch_col="batch_var"   data.kwargs.pert_col="target_gene"   data.kwargs.cell_type_key="cell_type"   data.kwargs.control_pert="non-targeting"   data.kwargs.perturbation_features_file="competition_support_set/ESM2_pert_features.pt"   training.max_steps=213   training.ckpt_every_n_steps=213 training.val_freq=2 model=xgboost   wandb.tags="xgboost"   output_dir="competition"   name="xgboost"
 
 SCIPY_ARRAY_API=1 python -m src.state tx train data.kwargs.toml_config_path="competition_support_set/starter.toml"   data.kwargs.num_workers=4   data.kwargs.batch_col="batch_var"   data.kwargs.pert_col="target_gene"   data.kwargs.cell_type_key="cell_type"   data.kwargs.control_pert="non-targeting"   data.kwargs.perturbation_features_file="competition_support_set/ESM2_pert_features.pt"   training.max_steps=213   training.ckpt_every_n_steps=213 training.val_freq=213 model=tabpfn   wandb.tags="tabpfn"   output_dir="competition"   name="tabpfn"
+python -m src.state tx train data.kwargs.toml_config_path="competition_support_set/starter.toml"   data.kwargs.num_workers=4   data.kwargs.batch_col="batch_var"   data.kwargs.pert_col="target_gene"   data.kwargs.cell_type_key="cell_type"   data.kwargs.control_pert="non-targeting"   data.kwargs.perturbation_features_file="competition_support_set/ESM2_pert_features.pt"   tr             login01" 17:12 06-Nov-25aining.max_steps=213   training.ckpt_every_n_steps=213 training.val_freq=213 model=causalpfn   wandb.tags="causalpfn"   output_dir="competition"   name="causalpfn"
+
 ```bash
 state tx train \
 data.kwargs.toml_config_path="examples/fewshot.toml" \
@@ -217,3 +219,12 @@ f['var/id'][:]: array([b'ENSG00000000003.14', b'ENSG00000000005.5', b'ENSG000000
 /scratch/absking/vcc/state/.venv/lib/python3.11/site-packages/cell_load/dataset/_perturbation.py
 
 Q: why same number of perturbed cells and control cells
+
+
+causalFPN: module load StdEnv/2023 gcc/12.3 cuda/12.2
+(vector) absking@klogin01:~/scratch/vcc$ module load faiss/1.7.4
+pip install --no-deps huggingface_hub
+
+export PYTHONPATH="/home/absking/scratch/vcc/cell-load/src:$PYTHONPATH"
+
+python -m src.state tx train data.kwargs.toml_config_path="competition_support_set/starter.toml"   data.kwargs.num_workers=4   data.kwargs.batch_col="batch_var"   data.kwargs.pert_col="target_gene"   data.kwargs.cell_type_key="cell_type"   data.kwargs.control_pert="non-targeting"   data.kwargs.perturbation_features_file="competition_support_set/ESM2_pert_features.pt"   training.max_steps=213   training.ckpt_every_n_steps=213 training.val_freq=213 model=causalpfn   wandb.tags="causalpfn"   output_dir="competition"   name="causalpfn"

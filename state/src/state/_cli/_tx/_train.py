@@ -77,7 +77,7 @@ def run_tx_train(cfg: DictConfig):
                 sentence_len = cfg["model"]["kwargs"]["transformer_backbone_kwargs"]["n_positions"]
             except:
                 sentence_len = cfg["model"]["kwargs"]["transformer_backbone_kwargs"]["max_position_embeddings"]
-    breakpoint()
+
     if cfg["model"]["name"].lower().startswith("scgpt"):  # scGPT uses log-normalized expression
         cfg["data"]["kwargs"]["transform"] = "log-normalize"
         cfg["data"]["kwargs"]["hvg_names_uns_key"] = (
