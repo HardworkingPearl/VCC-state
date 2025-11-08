@@ -26,6 +26,7 @@ from .samplers import PerturbationBatchSampler
 logger = logging.getLogger(__name__)
 ##### cell_load/data_modules/perturbation_dataloader.py
 
+
 class PerturbationDataModule(LightningDataModule):
     """
     A unified data module that sets up train/val/test splits for multiple dataset/celltype
@@ -51,7 +52,8 @@ class PerturbationDataModule(LightningDataModule):
         cell_sentence_len: int = 512,
         cache_perturbation_control_pairs: bool = False,
         drop_last: bool = False,
-        **kwargs,  # missing perturbation_features_file  and store_raw_basal for backwards compatibility
+        **
+        kwargs,  # missing perturbation_features_file  and store_raw_basal for backwards compatibility
     ):
         """
         This class is responsible for serving multiple PerturbationDataset's each of which is specific
@@ -101,7 +103,8 @@ class PerturbationDataModule(LightningDataModule):
 
         # Optional behaviors
         self.map_controls = kwargs.get("map_controls", True)
-        self.perturbation_features_file = kwargs.get("perturbation_features_file")
+        self.perturbation_features_file = kwargs.get(
+            "perturbation_features_file")
         self.int_counts = kwargs.get("int_counts", False)
         self.normalize_counts = kwargs.get("normalize_counts", False)
         self.store_raw_basal = kwargs.get("store_raw_basal", False)
@@ -109,8 +112,7 @@ class PerturbationDataModule(LightningDataModule):
 
         logger.info(
             f"Initializing DataModule: batch_size={batch_size}, workers={num_workers}, "
-            f"random_seed={random_seed}"
-        )
+            f"random_seed={random_seed}")
 
         # Mapping strategy
         self.basal_mapping_strategy = basal_mapping_strategy
@@ -122,11 +124,8 @@ class PerturbationDataModule(LightningDataModule):
         # Determine if raw expression is needed
         self.store_raw_expression = bool(
             self.embed_key
-            and (
-                (self.embed_key != "X_hvg" and self.output_space == "gene")
-                or self.output_space == "all"
-            )
-        )
+            and ((self.embed_key != "X_hvg" and self.output_space == "gene")
+                 or self.output_space == "all"))
 
         # Prepare dataset lists and maps
         self.train_datasets: list[Dataset] = []
@@ -147,7 +146,8 @@ class PerturbationDataModule(LightningDataModule):
         This assumes all datasets have the same gene names.
         """
         if len(self.test_datasets) == 0:
-            raise ValueError("No test datasets available to extract variable names.")
+            raise ValueError(
+                "No test datasets available to extract variable names.")
         underlying_ds: PerturbationDataset = self.test_datasets[0].dataset
         return underlying_ds.get_gene_names(output_space=self.output_space)
 
@@ -187,7 +187,8 @@ class PerturbationDataModule(LightningDataModule):
             "n_basal_samples": self.n_basal_samples,
             "should_yield_control_cells": self.should_yield_control_cells,
             "cell_sentence_len": self.cell_sentence_len,
-            "cache_perturbation_control_pairs": self.cache_perturbation_control_pairs,
+            "cache_perturbation_control_pairs":
+            self.cache_perturbation_control_pairs,
             # Include the optional behaviors
             "map_controls": self.map_controls,
             "perturbation_features_file": self.perturbation_features_file,
@@ -219,24 +220,25 @@ class PerturbationDataModule(LightningDataModule):
         # Validate that the toml config file still exists
         toml_path = Path(save_dict["toml_config_path"])
         if not toml_path.exists():
-            logger.warning(
-                f"TOML config file not found at {toml_path}. "
-                "Make sure the file exists or the path is correct."
-            )
+            logger.warning(f"TOML config file not found at {toml_path}. "
+                           "Make sure the file exists or the path is correct.")
 
         # Extract the kwargs that were passed to __init__
         kwargs = {
-            "map_controls": save_dict.pop("map_controls", True),
-            "cache_perturbation_control_pairs": save_dict.pop(
-                "cache_perturbation_control_pairs", False
-            ),
-            "perturbation_features_file": save_dict.pop(
-                "perturbation_features_file", None
-            ),
-            "int_counts": save_dict.pop("int_counts", False),
-            "normalize_counts": save_dict.pop("normalize_counts", False),
-            "store_raw_basal": save_dict.pop("store_raw_basal", False),
-            "barcode": save_dict.pop("barcode", True),
+            "map_controls":
+            save_dict.pop("map_controls", True),
+            "cache_perturbation_control_pairs":
+            save_dict.pop("cache_perturbation_control_pairs", False),
+            "perturbation_features_file":
+            save_dict.pop("perturbation_features_file", None),
+            "int_counts":
+            save_dict.pop("int_counts", False),
+            "normalize_counts":
+            save_dict.pop("normalize_counts", False),
+            "store_raw_basal":
+            save_dict.pop("store_raw_basal", False),
+            "barcode":
+            save_dict.pop("barcode", True),
         }
 
         # Create new instance with all the saved parameters
@@ -261,7 +263,8 @@ class PerturbationDataModule(LightningDataModule):
         else:
             output_dim = input_dim  # training on raw gene expression
 
-        gene_names = underlying_ds.get_gene_names(output_space=self.output_space)
+        gene_names = underlying_ds.get_gene_names(
+            output_space=self.output_space)
 
         # get the shape of the first value in pert_onehot_map
         pert_dim = next(iter(self.pert_onehot_map.values())).shape[0]
@@ -316,9 +319,12 @@ class PerturbationDataModule(LightningDataModule):
         # 3) Intersection = shared across both train and test
         shared_perts = train_perts & test_perts
 
-        logger.info(f"Found {len(train_perts)} distinct perts in the train subsets.")
-        logger.info(f"Found {len(test_perts)} distinct perts in the test subsets.")
-        logger.info(f"Found {len(shared_perts)} shared perturbations (train ∩ test).")
+        logger.info(
+            f"Found {len(train_perts)} distinct perts in the train subsets.")
+        logger.info(
+            f"Found {len(test_perts)} distinct perts in the test subsets.")
+        logger.info(
+            f"Found {len(shared_perts)} shared perturbations (train ∩ test).")
 
         return shared_perts
 
@@ -329,8 +335,7 @@ class PerturbationDataModule(LightningDataModule):
     def train_dataloader(self, test=False):
         if len(self.train_datasets) == 0:
             raise ValueError(
-                "No training datasets available. Please call setup() first."
-            )
+                "No training datasets available. Please call setup() first.")
         return self._create_dataloader(self.train_datasets, test=test)
 
     def val_dataloader(self):
@@ -341,7 +346,9 @@ class PerturbationDataModule(LightningDataModule):
     def test_dataloader(self):
         if len(self.test_datasets) == 0:
             return None
-        return self._create_dataloader(self.test_datasets, test=True, batch_size=1)
+        return self._create_dataloader(self.test_datasets,
+                                       test=True,
+                                       batch_size=1)
 
     def predict_dataloader(self):
         if len(self.test_datasets) == 0:
@@ -358,7 +365,8 @@ class PerturbationDataModule(LightningDataModule):
     ):
         """Create a DataLoader with appropriate configuration."""
         use_int_counts = "int_counts" in self.__dict__ and self.int_counts
-        collate_fn = partial(PerturbationDataset.collate_fn, int_counts=use_int_counts)
+        collate_fn = partial(PerturbationDataset.collate_fn,
+                             int_counts=use_int_counts)
 
         ds = MetadataConcatDataset(datasets)
         use_batch = self.basal_mapping_strategy == "batch"
@@ -397,12 +405,13 @@ class PerturbationDataModule(LightningDataModule):
             for _fname, fpath in files.items():
                 print(fpath)
                 with h5py.File(fpath, "r") as f:
-                    # TODO: SJQ + branch: 
-                    if dataset_name == "pbmcs":          
+                    # TODO: SJQ + branch:
+                    if dataset_name == "pbmcs":
                         batch_arr = f[f"obs/sample/categories"][:]
                         batches = set(safe_decode_array(batch_arr))
                         try:
-                            celltype_arr = f[f"obs/{self.cell_type_key}/categories"][:]
+                            celltype_arr = f[
+                                f"obs/{self.cell_type_key}/categories"][:]
                         except KeyError:
                             celltype_arr = f[f"obs/{self.cell_type_key}"][:]
                         celltypes = set(safe_decode_array(celltype_arr))
@@ -413,14 +422,26 @@ class PerturbationDataModule(LightningDataModule):
                     elif dataset_name == "seurat":
                         pert_arr = f[f"obs/gene"][:]
                         perts = set(safe_decode_array(pert_arr))
-                        all_perts.update(perts) 
+                        all_perts.update(perts)
 
                         batch_arr = f[f"obs/Batch_info"][:]
                         batches = set(safe_decode_array(batch_arr))
                         celltype_arr = f[f"obs/{self.cell_type_key}"][:]
-                        
+
                         all_batches.update(batches)
                         celltypes = set(safe_decode_array(celltype_arr))
+                        all_celltypes.update(celltypes)
+                    elif dataset_name in ["mcfaline", "srivatsam"]:
+                        batch_arr = f[f"obs/sample/categories"][:]
+                        batches = set(safe_decode_array(batch_arr))
+                        try:
+                            celltype_arr = f[
+                                f"obs/{self.cell_type_key}/categories"][:]
+                        except KeyError:
+                            celltype_arr = f[f"obs/{self.cell_type_key}"][:]
+                        celltypes = set(safe_decode_array(celltype_arr))
+
+                        all_batches.update(batches)
                         all_celltypes.update(celltypes)
                     else:
                         pert_arr = f[f"obs/{self.pert_col}/categories"][:]
@@ -428,13 +449,15 @@ class PerturbationDataModule(LightningDataModule):
                         all_perts.update(perts)  # pert gene names
 
                         try:
-                            batch_arr = f[f"obs/{self.batch_col}/categories"][:]
+                            batch_arr = f[
+                                f"obs/{self.batch_col}/categories"][:]
                         except KeyError:
                             batch_arr = f[f"obs/{self.batch_col}"][:]
                         batches = set(safe_decode_array(batch_arr))
-                    
+
                         try:
-                            celltype_arr = f[f"obs/{self.cell_type_key}/categories"][:]
+                            celltype_arr = f[
+                                f"obs/{self.cell_type_key}/categories"][:]
                         except KeyError:
                             celltype_arr = f[f"obs/{self.cell_type_key}"][:]
 
@@ -445,7 +468,9 @@ class PerturbationDataModule(LightningDataModule):
         # Create one-hot mapsj
         if self.perturbation_features_file:
             # Load the custom featurizations from a torch file
-            featurization_dict = torch.load(self.perturbation_features_file)  # missing? -> 0! {np.str_('non-targeting'), np.str_('TAZ')}
+            featurization_dict = torch.load(
+                self.perturbation_features_file
+            )  # missing? -> 0! {np.str_('non-targeting'), np.str_('TAZ')}
             # Validate that every perturbation in all_perts is in the featurization dict.
             missing = all_perts - set(featurization_dict.keys())
             if len(missing) > 0:
@@ -453,9 +478,8 @@ class PerturbationDataModule(LightningDataModule):
                 for pert in missing:
                     featurization_dict[pert] = torch.zeros(feature_dim)
 
-                logger.info(
-                    "Set %d missing perturbations to zero vectors.", len(missing)
-                )
+                logger.info("Set %d missing perturbations to zero vectors.",
+                            len(missing))
 
             logger.info(
                 "Loaded custom perturbation featurizations for %d perturbations.",
@@ -469,16 +493,14 @@ class PerturbationDataModule(LightningDataModule):
         self.batch_onehot_map = generate_onehot_map(all_batches)
         self.cell_type_onehot_map = generate_onehot_map(all_celltypes)
 
-    def _create_base_dataset(
-        self, dataset_name: str, fpath: Path
-    ) -> PerturbationDataset:
+    def _create_base_dataset(self, dataset_name: str,
+                             fpath: Path) -> PerturbationDataset:
         """Create a base PerturbationDataset instance."""
         mapping_kwargs = {"map_controls": self.map_controls}
 
         # Add cache_perturbation_control_pairs to mapping strategy kwargs
         mapping_kwargs["cache_perturbation_control_pairs"] = (
-            self.cache_perturbation_control_pairs
-        )
+            self.cache_perturbation_control_pairs)
 
         return PerturbationDataset(
             name=dataset_name,
@@ -515,19 +537,22 @@ class PerturbationDataModule(LightningDataModule):
             files = self._find_dataset_files(dataset_path)
 
             # Get configuration for this dataset
-            zeroshot_celltypes = self.config.get_zeroshot_celltypes(dataset_name)
+            zeroshot_celltypes = self.config.get_zeroshot_celltypes(
+                dataset_name)
             fewshot_celltypes = self.config.get_fewshot_celltypes(dataset_name)
-            is_training_dataset = self.config.training.get(dataset_name) == "train"
+            is_training_dataset = self.config.training.get(
+                dataset_name) == "train"
 
             logger.info(f"Processing dataset {dataset_name}:")
             logger.info(f"  - Training dataset: {is_training_dataset}")
-            logger.info(f"  - Zeroshot cell types: {list(zeroshot_celltypes.keys())}")
-            logger.info(f"  - Fewshot cell types: {list(fewshot_celltypes.keys())}")
+            logger.info(
+                f"  - Zeroshot cell types: {list(zeroshot_celltypes.keys())}")
+            logger.info(
+                f"  - Fewshot cell types: {list(fewshot_celltypes.keys())}")
 
             # Process each file in the dataset
-            for fname, fpath in tqdm(
-                list(files.items()), desc=f"Processing {dataset_name}"
-            ):
+            for fname, fpath in tqdm(list(files.items()),
+                                     desc=f"Processing {dataset_name}"):
                 # Create metadata cache
                 cache = GlobalH5MetadataCache().get_cache(
                     str(fpath),
@@ -544,8 +569,8 @@ class PerturbationDataModule(LightningDataModule):
                 for ct_idx, ct in enumerate(cache.cell_type_categories):
                     # if dataset_name == "seurat":
                     #     ct_mask = cache.cell_type_codes == ct.encode()  # ct_idx
-                    # else: 
-                    #     
+                    # else:
+                    #
                     ct_mask = cache.cell_type_codes == ct_idx
                     n_cells = np.sum(ct_mask)
 
@@ -555,7 +580,8 @@ class PerturbationDataModule(LightningDataModule):
                     ct_indices = np.where(ct_mask)[0]
 
                     # Split into control and perturbed indices
-                    ctrl_mask = cache.pert_codes[ct_indices] == cache.control_pert_code
+                    ctrl_mask = cache.pert_codes[
+                        ct_indices] == cache.control_pert_code
                     ctrl_indices = ct_indices[ctrl_mask]
                     pert_indices = ct_indices[~ctrl_mask]
 
@@ -633,28 +659,27 @@ class PerturbationDataModule(LightningDataModule):
             n_ctrl_test = int(len(ctrl_indices) * n_test / total_pert)
 
             val_ctrl_indices = ctrl_indices_shuffled[:n_ctrl_val]
-            test_ctrl_indices = ctrl_indices_shuffled[
-                n_ctrl_val : n_ctrl_val + n_ctrl_test
-            ]
-            train_ctrl_indices = ctrl_indices_shuffled[n_ctrl_val + n_ctrl_test :]
+            test_ctrl_indices = ctrl_indices_shuffled[n_ctrl_val:n_ctrl_val +
+                                                      n_ctrl_test]
+            train_ctrl_indices = ctrl_indices_shuffled[n_ctrl_val +
+                                                       n_ctrl_test:]
 
             # Create subsets
             if len(val_pert_indices) > 0:
-                subset = ds.to_subset_dataset("val", val_pert_indices, val_ctrl_indices)
+                subset = ds.to_subset_dataset("val", val_pert_indices,
+                                              val_ctrl_indices)
                 self.val_datasets.append(subset)
                 counts["val"] = len(subset)
 
             if len(test_pert_indices) > 0:
-                subset = ds.to_subset_dataset(
-                    "test", test_pert_indices, test_ctrl_indices
-                )
+                subset = ds.to_subset_dataset("test", test_pert_indices,
+                                              test_ctrl_indices)
                 self.test_datasets.append(subset)
                 counts["test"] = len(subset)
 
             if len(train_pert_indices) > 0:
-                subset = ds.to_subset_dataset(
-                    "train", train_pert_indices, train_ctrl_indices
-                )
+                subset = ds.to_subset_dataset("train", train_pert_indices,
+                                              train_ctrl_indices)
                 self.train_datasets.append(subset)
                 counts["train"] = len(subset)
 
@@ -717,8 +742,8 @@ class PerturbationDataModule(LightningDataModule):
                 return [text]
 
             # Extract the options and expand them
-            before = text[: match.start()]
-            after = text[match.end() :]
+            before = text[:match.start()]
+            after = text[match.end():]
             options = match.group(1).split(",")
 
             results = []
@@ -764,14 +789,15 @@ class PerturbationDataModule(LightningDataModule):
             # Fewshot: split perturbations according to config
             pert_config = fewshot_celltypes[celltype]
             split_counts = self._split_fewshot_celltype(
-                ds, pert_indices, ctrl_indices, cache, pert_config
-            )
+                ds, pert_indices, ctrl_indices, cache, pert_config)
             for split, count in split_counts.items():
                 counts[split] += count
 
         elif is_training_dataset:
             # Regular training cell type
-            subset = ds.to_subset_dataset("train", pert_indices.astype(np.int32),ctrl_indices.astype(np.int32))
+            subset = ds.to_subset_dataset("train",
+                                          pert_indices.astype(np.int32),
+                                          ctrl_indices.astype(np.int32))
             self.train_datasets.append(subset)
             counts["train"] = len(subset)
 
