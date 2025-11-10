@@ -379,10 +379,10 @@ class CausalPFNModel(PerturbationModel):
         #     # we are inferencing on a single batch, so accept variable length sentences
         #     pert = batch["pert_emb"].reshape(1, -1, self.pert_dim)
         #     basal = batch["ctrl_cell_emb"].reshape(1, -1, self.input_dim)
+        treatment = torch.tensor([int(t != 'non-targeting') for t in batch['pert_name']])
         if self.training:
             self.step += 1
             if len(batch["pert_emb"]) * (len(self.datasets)) < 10000:
-                treatment = torch.tensor([int(t != 'non-targeting') for t in batch['pert_name']])
                 self.treatments.append(treatment)
                 self.datasets.append(torch.cat((batch["pert_emb"],batch["ctrl_cell_emb"]), 1).cpu())
                 self.targets.append(batch["pert_cell_emb"].cpu())
@@ -462,11 +462,12 @@ class CausalPFNModel(PerturbationModel):
             #     self.tabicl_context_Y = batch["pert_cell_emb"].reshape(-1, self.cell_sentence_len, self.output_dim).detach()
             # if seq_input.shape[0] < 16:
             #     src = src.reshape(-1,  self.cell_sentence_len, 512)
-        pca_dim = 32 # 32  
+        pca_dim = 4 # 32  [ -1.95291519, -12.52326441]
         # breakpoint()
-        if self.step < 213: #  and self.training:
+        if self.step < 2:  #13  and self.training:
             output = None
         elif self.training:
+            # breakpoint()
             X = seq_input 
             if self.models == []:
                 X_train = torch.cat(self.datasets, 0).numpy()#[:10000]
@@ -477,7 +478,7 @@ class CausalPFNModel(PerturbationModel):
                 with open("target_pca.pkl", "rb") as f:
                     self.target_pca = pickle.load(f)
                 X_train = self.input_pca.transform(X_train)[:, :pca_dim]
-                y_train = self.target_pca.transform(y_train)  # [:, :pca_dim]
+                y_train = self.target_pca.transform(y_train) # [:, :pca_dim]
                 
                 for i in tqdm(range(y_train.shape[-1])):
                     reg = CATEEstimator(device='cuda',verbose=True,)  #TabPFNRegressor(device="cuda")      # GPU-backed model
@@ -489,13 +490,15 @@ class CausalPFNModel(PerturbationModel):
             X = self.input_pca.transform(X.cpu())
             preds = [] 
             for mdl in tqdm(self.models):
-                preds.append(mdl.estimate_cate(X[:, :pca_dim]).reshape(-1, 1))
-                
+                preds.append(mdl.estimate_y(X[:, :pca_dim], treatment.cpu().numpy()).reshape(-1, 1))
+                # 32 output: [109.72909546], [108.55466843],
+            
+            # breakpoint()
             output = np.concatenate(preds, -1)
             output = self.target_pca.inverse_transform(output)
             # output = np.dot(output, self.target_pca.components_[:pca_dim, :]) + self.target_pca.mean_
             output = torch.from_numpy(output).to('cuda').float()
-
+            # breakpoint()
         # apply relu if specified and we output to HVG space
         # is_gene_space = self.hparams["embed_key"] == "X_hvg" or self.hparams["embed_key"] is None
         # logger.info(f"DEBUG: is_gene_space: {is_gene_space}")
