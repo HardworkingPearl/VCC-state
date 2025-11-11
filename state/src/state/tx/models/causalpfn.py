@@ -462,12 +462,12 @@ class CausalPFNModel(PerturbationModel):
             #     self.tabicl_context_Y = batch["pert_cell_emb"].reshape(-1, self.cell_sentence_len, self.output_dim).detach()
             # if seq_input.shape[0] < 16:
             #     src = src.reshape(-1,  self.cell_sentence_len, 512)
-        pca_dim = 4 # 32  [ -1.95291519, -12.52326441]
+        pca_dim = 16 # 32  [ -1.95291519, -12.52326441]
         # breakpoint()
-        if self.step < 2:  #13  and self.training:
+        if self.step < 213:  #13  and self.training:
             output = None
         elif self.training:
-            # breakpoint()
+            breakpoint()
             X = seq_input 
             if self.models == []:
                 X_train = torch.cat(self.datasets, 0).numpy()#[:10000]
@@ -478,10 +478,11 @@ class CausalPFNModel(PerturbationModel):
                 with open("target_pca.pkl", "rb") as f:
                     self.target_pca = pickle.load(f)
                 X_train = self.input_pca.transform(X_train)[:, :pca_dim]
-                y_train = self.target_pca.transform(y_train) # [:, :pca_dim]
+                y_train = self.target_pca.transform(y_train)[:, :pca_dim]
                 
                 for i in tqdm(range(y_train.shape[-1])):
                     reg = CATEEstimator(device='cuda',verbose=True,)  #TabPFNRegressor(device="cuda")      # GPU-backed model
+                    reg.load_model()
                     reg.fit(X_train, t_train, y_train[:, i])                     # fast(-er) context fit
                     self.models.append(reg)
             output = None
@@ -495,8 +496,8 @@ class CausalPFNModel(PerturbationModel):
             
             # breakpoint()
             output = np.concatenate(preds, -1)
-            output = self.target_pca.inverse_transform(output)
-            # output = np.dot(output, self.target_pca.components_[:pca_dim, :]) + self.target_pca.mean_
+            # output = self.target_pca.inverse_transform(output)
+            output = np.dot(output, self.target_pca.components_[:pca_dim, :]) + self.target_pca.mean_
             output = torch.from_numpy(output).to('cuda').float()
             # breakpoint()
         # apply relu if specified and we output to HVG space

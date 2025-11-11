@@ -1,4 +1,4 @@
-state/target_pca.pkl
+state/target_pca*
 state/input_pca.pkl
 state/xgb_output_*
 state/competition_support_set.zip
@@ -13,3 +13,6 @@ state/assets/
 genes_nucleotides.fasta
 genes_proteins.fasta
 pert_genes.pkl
+*.npz
+*.pkl
+state/train_data.npz

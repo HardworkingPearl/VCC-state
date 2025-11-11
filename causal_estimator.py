@@ -91,8 +91,8 @@ class CausalEstimator(ABC):
         self,
         device: str,
         model_path: str = "vdblm/causalpfn",
-        max_context_length: int = 4096,
-        max_query_length: int = 4096,
+        max_context_length: int = 4096*4,
+        max_query_length: int = 4096*4,
         num_neighbours: int = 1024,
         calibrate: bool = False,
         n_folds: int = 3,
@@ -160,6 +160,160 @@ class CausalEstimator(ABC):
         if config["model_type"] == "tabdpt":
             self.max_feature_size = config["model"]["max_num_features"] - 1
             self.x_dim_transformer = TruncatedSVD(n_components=self.max_feature_size, algorithm="arpack")
+    
+    def _predict_cepo_pt(
+        self,
+        X_context: torch.tensor,     # shape (N_c, D)
+        t_context: torch.tensor,     # shape (N_c,)
+        y_context: torch.tensor,     # shape (N_c,)
+        X_query: torch.tensor,       # shape (N_q, D)
+        t_query: torch.tensor,       # shape (N_q,)
+        temperature: float,
+        n_samples: int | None = None,
+    ) -> torch.tensor:
+        if self.icl_model is None:
+            raise ValueError("CausalEstimator must be fitted before calling ...")
+        temperature_t = torch.tensor([temperature], device=self.device)
+        self.icl_model.train()
+        N_c, D = X_context.shape
+        N_q = X_query.shape[0]
+
+        # estimate CATE via weak learner if needed (optional)
+        # context_effects = self._estimate_cate_weak_learner(X_context.cpu().numpy())
+        # query_effects   = self._estimate_cate_weak_learner(X_query.cpu().numpy())
+        # But we skip that: we’ll search in X space instead.
+
+        # Separate context by treatment group
+        treat_idx = (t_context == 1).nonzero(as_tuple=False).squeeze(1)
+        ctrl_idx  = (t_context == 0).nonzero(as_tuple=False).squeeze(1)
+
+        X_treat = X_context[treat_idx]   # (N_t, D)
+        X_ctrl  = X_context[ctrl_idx]    # (N_c0, D)
+
+        # Pre-compute something if many queries: maybe normalise etc.
+
+        # For each query, compute distances to treatment & control context
+        # Here: we do this in large batch (may require memory work) or chunked
+
+        # Example brute-force:
+        # Distances: for each query i, compute ‖X_query[i] − X_treat[j]‖²
+        # We'll pick k = self.num_neighbours
+
+        k = self.num_neighbours
+
+        # Use FAISS for efficient nearest neighbor search instead of full distance matrices
+        # This avoids creating (N_q, N_t) and (N_q, N_c0) distance matrices in memory
+        # Convert to numpy for FAISS (FAISS works with numpy arrays)
+        X_query_np = X_query.detach().cpu().numpy().astype(np.float32)
+        X_treat_np = X_treat.detach().cpu().numpy().astype(np.float32)
+        X_ctrl_np = X_ctrl.detach().cpu().numpy().astype(np.float32)
+        
+        # Ensure arrays are 2D and contiguous (FAISS requires 2D arrays with shape (n_samples, n_features))
+        # Explicitly reshape to ensure correct shape - handle both empty and non-empty cases
+        if X_query_np.ndim != 2:
+            X_query_np = X_query_np.reshape(N_q, D)
+        X_query_np = np.ascontiguousarray(X_query_np)
+        
+        if X_treat_np.ndim != 2:
+            if X_treat_np.size == 0:
+                X_treat_np = np.empty((0, D), dtype=np.float32)
+            else:
+                X_treat_np = X_treat_np.reshape(-1, D)
+        X_treat_np = np.ascontiguousarray(X_treat_np)
+        
+        if X_ctrl_np.ndim != 2:
+            if X_ctrl_np.size == 0:
+                X_ctrl_np = np.empty((0, D), dtype=np.float32)
+            else:
+                X_ctrl_np = X_ctrl_np.reshape(-1, D)
+        X_ctrl_np = np.ascontiguousarray(X_ctrl_np)
+        
+        # Build FAISS indices for treatment and control groups
+        index_treat = faiss.IndexFlatL2(D)
+        if X_treat_np.shape[0] > 0:
+            index_treat.add(X_treat_np)
+        
+        index_ctrl = faiss.IndexFlatL2(D)
+        if X_ctrl_np.shape[0] > 0:
+            index_ctrl.add(X_ctrl_np)
+        
+        # Search for nearest neighbors (returns distances and indices)
+        k_treat = min(k, X_treat_np.shape[0]) if X_treat_np.shape[0] > 0 else 0
+        k_ctrl = min(k, X_ctrl_np.shape[0]) if X_ctrl_np.shape[0] > 0 else 0
+        
+        if k_treat > 0:
+            _, idx_treat_nn = index_treat.search(X_query_np, k=k_treat)
+            # Pad to k if needed
+            if k_treat < k:
+                padding = np.zeros((N_q, k - k_treat), dtype=np.int64)
+                idx_treat_nn = np.concatenate([idx_treat_nn, padding], axis=1)
+        else:
+            idx_treat_nn = np.zeros((N_q, k), dtype=np.int64)
+        
+        if k_ctrl > 0:
+            _, idx_ctrl_nn = index_ctrl.search(X_query_np, k=k_ctrl)
+            # Pad to k if needed
+            if k_ctrl < k:
+                padding = np.zeros((N_q, k - k_ctrl), dtype=np.int64)
+                idx_ctrl_nn = np.concatenate([idx_ctrl_nn, padding], axis=1)
+        else:
+            idx_ctrl_nn = np.zeros((N_q, k), dtype=np.int64)
+        
+        # Convert back to torch tensors and map to original context indices
+        idx_treat_nn = torch.from_numpy(idx_treat_nn).to(X_query.device)
+        idx_ctrl_nn = torch.from_numpy(idx_ctrl_nn).to(X_query.device)
+        
+        # Map those indices back to original context indices
+        real_treat_idx = treat_idx[idx_treat_nn]  # shape (N_q, k)
+        real_ctrl_idx  = ctrl_idx[idx_ctrl_nn]    # shape (N_q, k)
+
+        # For each query batch (you can chunk queries to respect max_query_length):
+        all_cepo = []
+        if n_samples is not None:
+            all_samples = torch.zeros(N_q, n_samples, device=self.device, dtype=X_query.dtype)
+
+        start_idx = 0
+        while start_idx < N_q:
+            end_idx = min(start_idx + self.max_query_length, N_q)
+            batch_idx = torch.arange(start_idx, end_idx, device=self.device)
+
+            # Collect context indices for this batch:
+            batch_treat_idx = real_treat_idx[batch_idx].flatten()
+            batch_ctrl_idx  = real_ctrl_idx[ batch_idx].flatten()
+            neighbour_idx   = torch.unique(torch.cat([batch_treat_idx, batch_ctrl_idx], dim=0))
+            assert neighbour_idx.numel() <= self.max_context_length
+
+            x_c = X_context[neighbour_idx]
+            t_c = t_context[ neighbour_idx]
+            y_c = y_context[ neighbour_idx]
+
+            x_q = X_query[batch_idx]
+            t_q = t_query[batch_idx]
+
+            # reshape for model (batch size = 1)
+            res = self.icl_model.predict_cepo(
+                X_context = x_c.unsqueeze(0),
+                t_context = t_c.unsqueeze(0),
+                y_context = y_c.unsqueeze(0),
+                X_query   = x_q.unsqueeze(0),
+                t_query   = t_q.unsqueeze(0),
+                n_samples = n_samples,
+                temperature=temperature_t,
+            )
+            if n_samples is None:
+                cepo = res.squeeze(0)
+                all_cepo.append(cepo)  # [batch_idx] = cepo
+            else:
+                cepo, samples = res
+                all_cepo[batch_idx]     = cepo.squeeze(0).squeeze(0)
+                all_samples[batch_idx]  = samples.squeeze(0).squeeze(0)
+
+            start_idx = end_idx
+        all_cepo = torch.cat(all_cepo, dim=0)
+        if n_samples is not None:
+            return all_cepo, all_samples
+        else:
+            return all_cepo
 
     @torch.no_grad()
     def _predict_cepo(
@@ -494,6 +648,29 @@ class CATEEstimator(CausalEstimator):
             X_query = self.x_dim_transformer.transform(X_query)
 
         mu = self._predict_cepo(
+            X_context=X_context,
+            t_context=t_context,
+            y_context=y_context,
+            X_query=X_query,
+            t_query=t,
+            temperature=self.prediction_temperature,
+        )
+        return mu
+
+    def estimate_y_pt(self, X: torch.tensor, t: torch.tensor) -> torch.tensor:
+        """
+        Estimate the conditional average treatment effect (CATE) using the fitted model.
+        Args:
+            X (torch.tensor): The input data with shape [N', D].
+        """
+        self._check_fitted()
+
+        X_context = self.X_train
+        t_context = self.t_train
+        y_context = self.y_train
+        X_query = X
+
+        mu = self._predict_cepo_pt(
             X_context=X_context,
             t_context=t_context,
             y_context=y_context,

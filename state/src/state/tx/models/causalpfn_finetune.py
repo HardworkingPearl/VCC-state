@@ -1,3 +1,5 @@
+from tabpfn import TabPFNRegressor
+
 import logging
 from typing import Dict, Optional
 
@@ -13,7 +15,9 @@ from .base import PerturbationModel
 from .decoders import FinetuneVCICountsDecoder
 from .decoders_nb import NBDecoder, nb_nll
 from .utils import build_mlp, get_activation_class, get_transformer_backbone, apply_lora
-
+import pickle
+from tqdm import tqdm
+from CausalPFN.src.causalpfn import CATEEstimator, ATEEstimator
 
 logger = logging.getLogger(__name__)
 
@@ -98,7 +102,7 @@ class ConfidenceToken(nn.Module):
         return main_output, confidence_pred
 
 
-class StateTransitionPerturbationModel(PerturbationModel):
+class CausalPFNModel(PerturbationModel):
     """
     This model:
       1) Projects basal expression and perturbation encodings into a shared latent space.
@@ -159,7 +163,7 @@ class StateTransitionPerturbationModel(PerturbationModel):
         self.transformer_backbone_key = transformer_backbone_key
         self.transformer_backbone_kwargs = transformer_backbone_kwargs
         self.transformer_backbone_kwargs["n_positions"] = self.cell_sentence_len + kwargs.get("extra_tokens", 0)
-
+        
         self.distributional_loss = distributional_loss
         self.gene_dim = gene_dim
 
@@ -264,6 +268,41 @@ class StateTransitionPerturbationModel(PerturbationModel):
         """
         Here we instantiate the actual GPT2-based model.
         """
+        self.step = 0
+        self.models = []
+        self.tabpfn_context_X = nn.Parameter(torch.randn(2048, 512)).to('cuda')  # 18080 + 5120
+        self.tabpfn_context_Y = nn.Parameter(torch.randn(2048, 512)).to('cuda')  # 512
+        # self.tabpfn_mdl = TabPFNRegressor(device='cuda',ignore_pretraining_limits=True)
+        loaded = np.load("train_data.npz")
+        self.datasets = loaded["X_train"]  #  raw dataset input as context 
+        self.targets = loaded["y_train"]   #  
+        self.treatments = torch.from_numpy(loaded["t_train"]).to('cuda')
+        causalpfn_cate = CATEEstimator(
+            device='cuda',
+            verbose=True,
+        )
+        causalpfn_cate.load_model()
+        # self.y_encoder Linear(in_features=1, out_features=384, bias=True)
+        # self.encoder Linear(in_features=100, out_features=384, bias=True)
+        self.causalpfn_mdl = causalpfn_cate             # +1 for treatment column in the input
+        self.causalpfn_mdl.icl_model.model.encoder = nn.Linear(self.hidden_dim+1, 384, bias=True, device='cuda')
+        self.causalpfn_mdl.icl_model.model.y_encoder = nn.Linear(self.hidden_dim, 384, bias=True, device='cuda')
+        self.causalpfn_mdl.icl_model.model.head[2] = nn.Linear(768, 672, bias=True, device='cuda')
+        self.causalpfn_mdl.icl_model.model.train()
+        # Register the model as a submodule so all its parameters are tracked and optimized
+        # This ensures encoder and y_encoder parameters are included in model.parameters()
+        self.add_module('causalpfn_model', self.causalpfn_mdl.icl_model.model)
+        
+        self.causalpfn_mdl.temperature = 1.0
+        with open("target_pca_672.pkl", "rb") as f:
+            self.target_pca = pickle.load(f)
+        self.targets = torch.from_numpy(self.target_pca.transform(self.targets)).to('cuda').float()
+        # nn.Linear(18080 + 5120, 18080)
+        # self.tabicl_mdl = TabICLClassifier(device='cuda')
+        # Project from input_dim to hidden_dim for transformer input
+        # self.project_to_hidden = nn.Linear(self.input_dim, self.hidden_dim)
+        # self.pert_y_encoder = nn.Linear(self.input_dim, 512)  # self.hidden_dim) C*E where C is the number of class tokens, E is the embedding dimension
+
         self.pert_encoder = build_mlp(
             in_dim=self.pert_dim,
             out_dim=self.hidden_dim,
@@ -286,37 +325,37 @@ class StateTransitionPerturbationModel(PerturbationModel):
         else:
             self.basal_encoder = nn.Linear(self.input_dim, self.hidden_dim)
 
-        self.transformer_backbone, self.transformer_model_dim = get_transformer_backbone(
-            self.transformer_backbone_key,
-            self.transformer_backbone_kwargs,
-        )
+        # self.transformer_backbone, self.transformer_model_dim = get_transformer_backbone(
+        #     self.transformer_backbone_key,
+        #     self.transformer_backbone_kwargs,
+        # )
 
         # Optionally wrap backbone with LoRA adapters
-        if lora_cfg and lora_cfg.get("enable", False):
-            self.transformer_backbone = apply_lora(
-                self.transformer_backbone,
-                self.transformer_backbone_key,
-                lora_cfg,
-            )
+        # if lora_cfg and lora_cfg.get("enable", False):
+        #     self.transformer_backbone = apply_lora(
+        #         self.transformer_backbone,
+        #         self.transformer_backbone_key,
+        #         lora_cfg,
+        #     )
 
         # Project from input_dim to hidden_dim for transformer input
         # self.project_to_hidden = nn.Linear(self.input_dim, self.hidden_dim)
 
-        self.project_out = build_mlp(
-            in_dim=self.hidden_dim,
-            out_dim=self.output_dim,
-            hidden_dim=self.hidden_dim,
-            n_layers=self.n_decoder_layers,
-            dropout=self.dropout,
-            activation=self.activation_class,
-        )
+        # self.project_out = build_mlp(
+        #     in_dim=self.hidden_dim,
+        #     out_dim=self.output_dim,
+        #     hidden_dim=self.hidden_dim,
+        #     n_layers=self.n_decoder_layers,
+        #     dropout=self.dropout,
+        #     activation=self.activation_class,
+        # )
 
-        if self.output_space == "all":
-            self.final_down_then_up = nn.Sequential(
-                nn.Linear(self.output_dim, self.output_dim // 8),
-                nn.GELU(),
-                nn.Linear(self.output_dim // 8, self.output_dim),
-            )
+        # if self.output_space == "all":
+        #     self.final_down_then_up = nn.Sequential(
+        #         nn.Linear(self.output_dim, self.output_dim // 8),
+        #         nn.GELU(),
+        #         nn.Linear(self.output_dim // 8, self.output_dim),
+        #     )
 
     def encode_perturbation(self, pert: torch.Tensor) -> torch.Tensor:
         """If needed, define how we embed the raw perturbation input."""
@@ -325,6 +364,7 @@ class StateTransitionPerturbationModel(PerturbationModel):
     def encode_basal_expression(self, expr: torch.Tensor) -> torch.Tensor:
         """Define how we embed basal state input, if needed."""
         return self.basal_encoder(expr)
+
 
     def forward(self, batch: dict, padded=True) -> torch.Tensor:
         """
@@ -339,23 +379,49 @@ class StateTransitionPerturbationModel(PerturbationModel):
         The `padded` argument here is set to True if the batch is padded. Otherwise, we
         expect a single batch, so that sentences can vary in length across batches.
         """
-        breakpoint() # np.where(np.array(batch['pert_name'])==np.str_('non-targeting'))
-        # batch["pert_emb"] = torch.stack(batch["pert_emb"]).to(batch["ctrl_cell_emb"].device)
         if padded:
-            pert = batch["pert_emb"].reshape(-1, self. cell_sentence_len, self.pert_dim)
+            pert = batch["pert_emb"].reshape(-1, self.cell_sentence_len, self.pert_dim)
             basal = batch["ctrl_cell_emb"].reshape(-1, self.cell_sentence_len, self.input_dim)
         else:
             # we are inferencing on a single batch, so accept variable length sentences
             pert = batch["pert_emb"].reshape(1, -1, self.pert_dim)
             basal = batch["ctrl_cell_emb"].reshape(1, -1, self.input_dim)
-
+        
         # Shape: [B, S, input_dim]
-        pert_embedding = self.encode_perturbation(pert)
-        control_cells = self.encode_basal_expression(basal)
-
+        pert_embedding = self.encode_perturbation(pert)  # 5120 -> 672
+        control_cells = self.encode_basal_expression(basal)  # 18080 -> 672
         # Add encodings in input_dim space, then project to hidden_dim
         combined_input = pert_embedding + control_cells  # Shape: [B, S, hidden_dim]
+        # combined_input = torch.cat((batch["pert_emb"],batch["ctrl_cell_emb"]), 1)
         seq_input = combined_input  # Shape: [B, S, hidden_dim] 672
+        
+        ########### TODO: this only at step 0:
+
+        if self.step == 0:
+            batch_size = 4096
+            num_samples = self.targets.shape[0]
+            pert_context = []
+            control_cells_context = []
+
+            for start in range(0, num_samples, batch_size):
+                end = min(start + batch_size, num_samples)
+                pert_batch = self.encode_perturbation(torch.from_numpy(self.datasets[start:end, self.input_dim:]).to('cuda'))                 
+                control_cells_batch = self.encode_basal_expression(torch.from_numpy(self.datasets[start:end, :self.input_dim]).to('cuda')) 
+                pert_context.append(pert_batch)
+                control_cells_context.append(control_cells_batch)
+
+            pert_context = torch.cat(pert_context, dim=0)
+            control_cells_context = torch.cat(control_cells_context, dim=0)
+            combined_input_context = pert_context + control_cells_context
+            self.causalpfn_mdl.X_train = combined_input_context.detach()
+            self.causalpfn_mdl.t_train = self.treatments
+            self.causalpfn_mdl.y_train = self.targets
+        if self.training: 
+            self.step+=1
+            if self.step == 213:
+                self.step = 0
+
+        treatment = torch.tensor([int(t != 'non-targeting') for t in batch['pert_name']]).to('cuda')
 
         if self.batch_encoder is not None:
             # Extract batch indices (assume they are integers or convert from one-hot)
@@ -395,40 +461,16 @@ class StateTransitionPerturbationModel(PerturbationModel):
 
             outputs = self.transformer_backbone(inputs_embeds=seq_input, attention_mask=attn_mask)
             transformer_output = outputs.last_hidden_state
-        else:
-            transformer_output = self.transformer_backbone(inputs_embeds=seq_input).last_hidden_state
-
-        # Extract confidence prediction if confidence token was used
-        if self.confidence_token is not None:   # skip
-            res_pred, confidence_pred = self.confidence_token.extract_confidence_prediction(transformer_output)
-        else:
-            res_pred = transformer_output
-
-        # add to basal if predicting residual
-        if self.predict_residual and self.output_space == "all":
-            # Project control_cells to hidden_dim space to match res_pred
-            # control_cells_hidden = self.project_to_hidden(control_cells)
-            # treat the actual prediction as a residual sum to basal
-            out_pred = self.project_out(res_pred) + basal  # [16, 128, 18080]
-            out_pred = self.final_down_then_up(out_pred)
-        elif self.predict_residual:
-            out_pred = self.project_out(res_pred + control_cells)
-        else:
-            out_pred = self.project_out(res_pred)
-
-        # apply relu if specified and we output to HVG space
-        is_gene_space = self.hparams["embed_key"] == "X_hvg" or self.hparams["embed_key"] is None
-        # logger.info(f"DEBUG: is_gene_space: {is_gene_space}")
-        # logger.info(f"DEBUG: self.gene_decoder: {self.gene_decoder}")
-        if is_gene_space or self.gene_decoder is None:
-            out_pred = self.relu(out_pred)
-
-        output = out_pred.reshape(-1, self.output_dim)
-
-        if confidence_pred is not None:
-            return output, confidence_pred
-        else:
-            return output
+        else:    
+            seq_input = seq_input.flatten(0, 1)
+            preds = self.causalpfn_mdl.estimate_y_pt(seq_input, treatment)
+        output = preds @ torch.from_numpy(self.target_pca.components_).float().to('cuda') + torch.from_numpy(self.target_pca.mean_).float().to('cuda')
+        # if confidence_pred is not None:
+        #     return output, confidence_pred
+        # else:
+        #     return output
+        return output
+        
 
     def training_step(self, batch: Dict[str, torch.Tensor], batch_idx: int, padded=True) -> torch.Tensor:
         """Training step logic for both main model and decoder."""
@@ -451,7 +493,6 @@ class StateTransitionPerturbationModel(PerturbationModel):
         main_loss = self.loss_fn(pred, target).nanmean()  # both: [16, 128, 18080]
         self.log("train_loss", main_loss)
         print("train_loss", main_loss)
-        # breakpoint()
         # Log individual loss components if using combined loss
         if hasattr(self.loss_fn, "sinkhorn_loss") and hasattr(self.loss_fn, "energy_loss"):
             sinkhorn_component = self.loss_fn.sinkhorn_loss(pred, target).nanmean()

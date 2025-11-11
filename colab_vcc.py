@@ -77,6 +77,13 @@ uv run state tx infer \
   --checkpoint "competition/first_run/checkpoints/final.ckpt" \
   --adata "competition_support_set/competition_val_template.h5ad" \
   --pert-col "target_gene"
+
+python -m state tx infer \
+  --output "competition/prediction.h5ad" \
+  --model-dir "competition/causalpfn" \
+  --checkpoint "competition/causalpfn/checkpoints/step=step=28968-val_loss=val_loss=4.4869.ckpt" \
+  --adata "competition_support_set/competition_val_template.h5ad" \
+  --pert-col "target_gene"
 ###################### cell eval #########################
 curl -L -A "Mozilla/5.0" -e "https://plus.figshare.com" "https://plus.figshare.com/ndownloader/files/35775554" -o rpe1_normalized_singlecell_01.h5ad
 curl -L -A "Mozilla/5.0" -e "https://www.ncbi.nlm.nih.gov" "https://www.ncbi.nlm.nih.gov/geo/download/?acc=GSE264667&format=file&file=GSE264667%5Fhepg2%5Fraw%5Fsinglecell%5F01%2Eh5ad" -o GSE264667_hepg2_raw_singlecell_01.h5ad
@@ -213,20 +220,22 @@ f['var/id'][:]: array([b'ENSG00000000003.14', b'ENSG00000000005.5', b'ENSG000000
 
 
 
-
+# for datasets loading
 /scratch/absking/vcc/state/.venv/lib/python3.11/site-packages/cell_load/utils/data_utils.py
 /scratch/absking/vcc/state/.venv/lib/python3.11/site-packages/cell_load/data_modules/perturbation_dataloader.py
 /scratch/absking/vcc/state/.venv/lib/python3.11/site-packages/cell_load/dataset/_perturbation.py
 
+# for causalpfn
 /home/absking/scratch/CausalPFN/src/causalpfn/causal_estimator.py
-/scratch/absking/CausalPFN/src/causalpfn/models/icl_model.py
+/home/absking/scratch/CausalPFN/src/causalpfn/models/icl_model.py
+/scratch/absking/CausalPFN/src/causalpfn/models/model.py
 Q: why same number of perturbed cells and control cells
 
 
 causalFPN: module load StdEnv/2023 gcc/12.3 cuda/12.2
 (vector) absking@klogin01:~/scratch/vcc$ module load faiss/1.7.4
-pip install --no-deps huggingface_hub
-
 export PYTHONPATH="/home/absking/scratch/vcc/cell-load/src:$PYTHONPATH"
+
+pip install --no-deps huggingface_hub
 
 python -m src.state tx train data.kwargs.toml_config_path="competition_support_set/starter.toml"   data.kwargs.num_workers=4   data.kwargs.batch_col="batch_var"   data.kwargs.pert_col="target_gene"   data.kwargs.cell_type_key="cell_type"   data.kwargs.control_pert="non-targeting"   data.kwargs.perturbation_features_file="competition_support_set/ESM2_pert_features.pt"   training.max_steps=213   training.ckpt_every_n_steps=213 training.val_freq=213 model=causalpfn   wandb.tags="causalpfn"   output_dir="competition"   name="causalpfn"

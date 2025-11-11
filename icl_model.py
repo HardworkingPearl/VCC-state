@@ -39,6 +39,29 @@ class InContextModel(nn.Module):
         bin_width = bin_edges[1] - bin_edges[0]
         bin_centers = bin_edges[:-1] + 0.5 * bin_width  # shape: (nbins,)
 
+        # self.vmin = [vmin]*672
+        # self.vmax = [vmax]*672
+        # # To support multidimensional bin centers, allow vmin and vmax to be lists or tensors
+        # if isinstance(self.vmin, (float, int)):
+        #     self.vmin = [self.vmin]
+        # if isinstance(self.vmax, (float, int)):
+        #     self.vmax = [self.vmax]
+
+        # self.n_output = len(self.vmin)
+        # # bin_edges: (n_output, nbins+1)
+        # bin_edges = torch.stack([
+        #     torch.linspace(self.vmin[i], self.vmax[i], self.nbins + 1) for i in range(self.n_output)
+        # ], dim=0)
+        # bin_width = bin_edges[:, 1] - bin_edges[:, 0]  # shape: (n_output,)
+        # bin_centers = bin_edges[:, :-1] + 0.5 * bin_width[:, None]  # shape: (n_output, nbins)
+
+        # # If only one output dimension, squeeze to keep old shape for backward compat
+        # if self.n_output == 1:
+        #     bin_edges = bin_edges.squeeze(0)
+        #     bin_width = bin_width.squeeze(0)
+        #     bin_centers = bin_centers.squeeze(0)
+
+
         self.register_buffer("bin_edges", bin_edges)  # (nbins+1,)
         self.register_buffer("bin_width", bin_width)  # () – 0-D tensor
         self.register_buffer("bin_centers", bin_centers)  # (nbins,)
@@ -221,7 +244,7 @@ class InContextModel(nn.Module):
         )  # shape: (batch_size, query_len, nbins)
         logits = logits[:, :, -self.model.nbins :]  # only keep the last nbins, which are the predictions
 
-        logits /= temperature  # Apply temperature scaling
+        logits = logits / temperature  # Apply temperature scaling (non-inplace to preserve gradients)
         return self._hl_gaussian_cross_entropy_loss(
             logits=logits,
             y_target=Ey_target,
@@ -265,12 +288,12 @@ class InContextModel(nn.Module):
         n_samples: int | None = None,
     ) -> torch.Tensor | Tuple[torch.Tensor, torch.Tensor]:
         y0_shift, y0_scale, y1_shift, y1_scale = self._get_y0_y1_shift_scale(t_context, y_context)
-        x0_shift, x0_scale, x1_shift, x1_scale = self._get_y0_y1_shift_scale(t_context, X_context)
-        if len(t_context.shape)==2:
+        # x0_shift, x0_scale, x1_shift, x1_scale = self._get_y0_y1_shift_scale(t_context, X_context)
+        if len(X_query.shape)==2:
             y_standardized = torch.where(
                 t_context == 1, (y_context - y1_shift) / y1_scale, (y_context - y0_shift) / y0_scale
             )
-        elif len(t_context.shape)==3:
+        elif len(X_query.shape)==3:
             y_standardized = torch.where(
             t_context[..., None] == 1, (y_context - y1_shift) / y1_scale, (y_context - y0_shift) / y0_scale
         )
@@ -301,11 +324,13 @@ class InContextModel(nn.Module):
             [x_and_t_context, x_and_t_query], dim=1
         )  # shape: (batch_size, context_len + query_len, num_features + 1)
 
-        x_src, y_src = self.prepare_input(x_and_t, y_standardized)
-
+        # x_src, y_src = self.prepare_input(x_and_t, y_standardized)
+        x_src, y_src = x_and_t, y_standardized
         logits = self.model(x_src.transpose(0, 1), y_src.transpose(0, 1)).transpose(
             0, 1
         )  # shape: (batch_size, query_len, nbins)
+        
+        """
         logits = logits[:, :, -self.model.nbins :]  # only keep the last nbins, which are the predictions
 
         logits = logits.unsqueeze(1)  # shape: (batch_size, 1, query_len, nbins)
@@ -318,7 +343,9 @@ class InContextModel(nn.Module):
         logits = logits / temperature  # Apply temperature scaling
 
         mean = self._predict_mean(logits)  # shape: (batch_size, num_temperatures, query_len)
-        mean_shift_scaled = torch.where(t_query == 1, mean * y1_scale + y1_shift, mean * y0_scale + y0_shift)
+        """
+        mean = logits
+        mean_shift_scaled = torch.where(t_query[..., None] == 1, mean * y1_scale + y1_shift, mean * y0_scale + y0_shift)
 
         if n_samples is None:
             return mean_shift_scaled

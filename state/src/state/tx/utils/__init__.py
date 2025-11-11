@@ -226,8 +226,8 @@ def get_lightning_module(model_type: str, data_config: dict, model_config: dict,
             **module_config,
         )
     elif model_type.lower() == "causalpfn":
-        from ...tx.models.causalpfn import CausalPFNModel
-
+        # from ...tx.models.causalpfn import CausalPFNModel
+        from ...tx.models.causalpfn_finetune import CausalPFNModel
         return CausalPFNModel(
             input_dim=var_dims["input_dim"],
             gene_dim=gene_dim,
