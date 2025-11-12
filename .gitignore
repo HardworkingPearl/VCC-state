@@ -17,3 +17,5 @@ pert_genes.pkl
 *.npz
 *.pkl
 state/train_data.npz
+genes_nuc_embeddings.pt
+*.pt
