@@ -284,7 +284,7 @@ class CausalPFNModel(PerturbationModel):
         causalpfn_cate.load_model()
         self.causalpfn_mdl = causalpfn_cate.icl_model
         self.tabpfn_pseudo_train_layer = build_mlp(
-            in_dim=18080 + 5120,
+            in_dim=18080 + 7040, #5120,
             out_dim=18080,
             hidden_dim=64,
             n_layers=2,
@@ -464,7 +464,7 @@ class CausalPFNModel(PerturbationModel):
             #     src = src.reshape(-1,  self.cell_sentence_len, 512)
         pca_dim = 16 # 32  [ -1.95291519, -12.52326441]
         # breakpoint()
-        if self.step < 213:  #13  and self.training:
+        if self.step < 213:  #213  and self.training:
             output = None
         elif self.training:
             breakpoint()
@@ -473,6 +473,8 @@ class CausalPFNModel(PerturbationModel):
                 X_train = torch.cat(self.datasets, 0).numpy()#[:10000]
                 y_train = torch.cat(self.targets, 0).numpy()#[:10000]
                 t_train = torch.cat(self.treatments, 0).numpy()
+                # Save arrays as dictionary to npz file
+                # np.savez_compressed("train_data.npz", X_train=X_train, y_train=y_train, t_train=t_train)
                 with open("input_pca.pkl", "rb") as f:
                     self.input_pca = pickle.load(f)
                 with open("target_pca.pkl", "rb") as f:

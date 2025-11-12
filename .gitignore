@@ -10,6 +10,7 @@ state/wandb/
 state/wandb_logs
 state/.venv/
 state/assets/
+state/*.npz
 genes_nucleotides.fasta
 genes_proteins.fasta
 pert_genes.pkl

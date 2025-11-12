@@ -434,6 +434,7 @@ class StateTransitionPerturbationModel(PerturbationModel):
         """Training step logic for both main model and decoder."""
         # Get model predictions (in latent space)
         confidence_pred = None
+        breakpoint()
         if self.confidence_token is not None:
             pred, confidence_pred = self.forward(batch, padded=padded)
         else:

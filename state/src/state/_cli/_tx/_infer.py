@@ -378,7 +378,36 @@ def run_tx_infer(args: argparse.Namespace):
         if not args.quiet:
             print(f"No --checkpoint given, using {checkpoint_path}")
 
-    model = StateTransitionPerturbationModel.load_from_checkpoint(checkpoint_path)
+    # model = StateTransitionPerturbationModel.load_from_checkpoint(checkpoint_path)
+    model_name = cfg.get("model", {}).get("name", "state")
+    model_name_lower = model_name.lower() if isinstance(model_name, str) else "state"
+
+    if model_name_lower == "causalpfn":
+        from ...tx.models.causalpfn_finetune import CausalPFNModel as ModelClass
+    elif model_name_lower == "tabpfn":
+        from ...tx.models.tabpfn import TabPFNModel as ModelClass
+    elif model_name_lower == "xgboost":
+        from ...tx.models.xgboost import XGBoosModel as ModelClass
+    elif model_name_lower in {"globalsimplesum", "perturb_mean"}:
+        from ...tx.models.perturb_mean import PerturbMeanPerturbationModel as ModelClass
+    elif model_name_lower in {"celltypemean", "context_mean"}:
+        from ...tx.models.context_mean import ContextMeanPerturbationModel as ModelClass
+    elif model_name_lower == "decoder_only":
+        from ...tx.models.decoder_only import DecoderOnlyPerturbationModel as ModelClass
+    elif model_name_lower == "pseudobulk":
+        from ...tx.models.pseudobulk import PseudobulkPerturbationModel as ModelClass
+    elif model_name_lower == "cpa":
+        from ...tx.models.cpa import CPAPerturbationModel as ModelClass
+    elif model_name_lower == "scvi":
+        from ...tx.models.scvi import SCVIPerturbationModel as ModelClass
+    elif model_name_lower in {"scgpt-chemical", "scgpt-genetic"}:
+        from ...tx.models.scgpt import scGPTForPerturbation as ModelClass
+    elif model_name_lower == "tabicl":
+        from ...tx.models.tabicl_transition import TabICLModel as ModelClass
+    else:
+        from ...tx.models.state_transition import StateTransitionPerturbationModel as ModelClass
+
+    model = ModelClass.load_from_checkpoint(checkpoint_path)
     model.eval()
     device = next(model.parameters()).device
     cell_set_len = args.max_set_len if args.max_set_len is not None else getattr(model, "cell_sentence_len", 256)

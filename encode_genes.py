@@ -208,7 +208,7 @@ def encode_with_evo2(fasta_path, model_name="evo2_1b_base", device=None):  # "ev
     layer_name = 'blocks.22.post_norm' # 'blocks.28.post_norm'
     device = device or torch.device("cuda" if torch.cuda.is_available() else "cpu")
     evo_model = evo_model  # .to(device)
-    embeddings = {}
+    list_embeddings = {}
     breakpoint()
     for rec in tqdm(SeqIO.parse(fasta_path, "fasta")):
         seq = str(rec.seq).upper().replace("U", "T")
@@ -218,8 +218,9 @@ def encode_with_evo2(fasta_path, model_name="evo2_1b_base", device=None):  # "ev
         # Choose the layer or embedding you want — example: last_hidden_state mean
         hidden = embeddings[layer_name] # outputs[0][0]  # .last_hidden_state  # shape [1, L, D]
         embed = hidden.mean(dim=1).cpu().squeeze(0)  # [D]
-        embeddings[rec.id] = embed
-    return embeddings
+        list_embeddings[rec.id] = embed
+    breakpoint()
+    return list_embeddings
 
 # -------- MAIN EXECUTION --------
 if __name__ == "__main__":
@@ -241,3 +242,4 @@ if __name__ == "__main__":
     logger.info(f"Nucleotide embeddings saved to {EMBED_OUT_NUC}")
 
     logger.info("All embeddings complete. You can now feed these into your Virtual Cell Challenge workflow.")
+

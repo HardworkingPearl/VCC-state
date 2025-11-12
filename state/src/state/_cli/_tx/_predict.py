@@ -175,6 +175,10 @@ def run_tx_predict(args: ap.ArgumentParser):
         from ...tx.models.decoder_only import DecoderOnlyPerturbationModel
 
         ModelClass = DecoderOnlyPerturbationModel
+    elif model_class_name.lower() == "causalpfn":
+        from ...tx.models.causalpfn_finetune import CausalPFNModel
+
+        ModelClass = CausalPFNModel
     else:
         raise ValueError(f"Unknown model class: {model_class_name}")
 

@@ -1,5 +1,3 @@
-from tabpfn import TabPFNRegressor
-
 import logging
 from typing import Dict, Optional
 
@@ -273,7 +271,7 @@ class CausalPFNModel(PerturbationModel):
         self.tabpfn_context_X = nn.Parameter(torch.randn(2048, 512)).to('cuda')  # 18080 + 5120
         self.tabpfn_context_Y = nn.Parameter(torch.randn(2048, 512)).to('cuda')  # 512
         # self.tabpfn_mdl = TabPFNRegressor(device='cuda',ignore_pretraining_limits=True)
-        loaded = np.load("train_data.npz")
+        loaded = np.load("train_data_esm_evo.npz")  # np.load("train_data.npz")
         self.datasets = loaded["X_train"]  #  raw dataset input as context 
         self.targets = loaded["y_train"]   #  
         self.treatments = torch.from_numpy(loaded["t_train"]).to('cuda')
@@ -304,7 +302,7 @@ class CausalPFNModel(PerturbationModel):
         # self.pert_y_encoder = nn.Linear(self.input_dim, 512)  # self.hidden_dim) C*E where C is the number of class tokens, E is the embedding dimension
 
         self.pert_encoder = build_mlp(
-            in_dim=self.pert_dim,
+            in_dim=7040, # self.pert_dim,
             out_dim=self.hidden_dim,
             hidden_dim=self.hidden_dim,
             n_layers=self.n_encoder_layers,
@@ -469,7 +467,7 @@ class CausalPFNModel(PerturbationModel):
         #     return output, confidence_pred
         # else:
         #     return output
-        return output
+        return self.relu(output)
         
 
     def training_step(self, batch: Dict[str, torch.Tensor], batch_idx: int, padded=True) -> torch.Tensor:

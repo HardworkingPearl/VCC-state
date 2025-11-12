@@ -47,7 +47,7 @@ python -m src.state tx train data.kwargs.toml_config_path="competition_support_s
 python -m src.state tx train data.kwargs.toml_config_path="competition_support_set/starter.toml"   data.kwargs.num_workers=4   data.kwargs.batch_col="batch_var"   data.kwargs.pert_col="target_gene"   data.kwargs.cell_type_key="cell_type"   data.kwargs.control_pert="non-targeting"   data.kwargs.perturbation_features_file="competition_support_set/ESM2_pert_features.pt"   training.max_steps=213   training.ckpt_every_n_steps=213 training.val_freq=2 model=xgboost   wandb.tags="xgboost"   output_dir="competition"   name="xgboost"
 
 SCIPY_ARRAY_API=1 python -m src.state tx train data.kwargs.toml_config_path="competition_support_set/starter.toml"   data.kwargs.num_workers=4   data.kwargs.batch_col="batch_var"   data.kwargs.pert_col="target_gene"   data.kwargs.cell_type_key="cell_type"   data.kwargs.control_pert="non-targeting"   data.kwargs.perturbation_features_file="competition_support_set/ESM2_pert_features.pt"   training.max_steps=213   training.ckpt_every_n_steps=213 training.val_freq=213 model=tabpfn   wandb.tags="tabpfn"   output_dir="competition"   name="tabpfn"
-python -m src.state tx train data.kwargs.toml_config_path="competition_support_set/starter.toml"   data.kwargs.num_workers=4   data.kwargs.batch_col="batch_var"   data.kwargs.pert_col="target_gene"   data.kwargs.cell_type_key="cell_type"   data.kwargs.control_pert="non-targeting"   data.kwargs.perturbation_features_file="competition_support_set/ESM2_pert_features.pt"   tr             login01" 17:12 06-Nov-25aining.max_steps=213   training.ckpt_every_n_steps=213 training.val_freq=213 model=causalpfn   wandb.tags="causalpfn"   output_dir="competition"   name="causalpfn"
+python -m src.state tx train data.kwargs.toml_config_path="competition_support_set/starter.toml"   data.kwargs.num_workers=4   data.kwargs.batch_col="batch_var"   data.kwargs.pert_col="target_gene"   data.kwargs.cell_type_key="cell_type"   data.kwargs.control_pert="non-targeting"   data.kwargs.perturbation_features_file="competition_support_set/ESM2_pert_features.pt"   training.max_steps=213   training.ckpt_every_n_steps=213 training.val_freq=213 model=causalpfn   wandb.tags="causalpfn"   output_dir="competition"   name="causalpfn"
 
 ```bash
 state tx train \
@@ -78,12 +78,13 @@ uv run state tx infer \
   --adata "competition_support_set/competition_val_template.h5ad" \
   --pert-col "target_gene"
 
-python -m state tx infer \
+python -m src.state tx infer \
   --output "competition/prediction.h5ad" \
   --model-dir "competition/causalpfn" \
   --checkpoint "competition/causalpfn/checkpoints/step=step=28968-val_loss=val_loss=4.4869.ckpt" \
   --adata "competition_support_set/competition_val_template.h5ad" \
   --pert-col "target_gene"
+  --model "causalpfn"
 ###################### cell eval #########################
 curl -L -A "Mozilla/5.0" -e "https://plus.figshare.com" "https://plus.figshare.com/ndownloader/files/35775554" -o rpe1_normalized_singlecell_01.h5ad
 curl -L -A "Mozilla/5.0" -e "https://www.ncbi.nlm.nih.gov" "https://www.ncbi.nlm.nih.gov/geo/download/?acc=GSE264667&format=file&file=GSE264667%5Fhepg2%5Fraw%5Fsinglecell%5F01%2Eh5ad" -o GSE264667_hepg2_raw_singlecell_01.h5ad
@@ -92,6 +93,25 @@ export PYTHONPATH="$PWD/src:$PYTHONPATH"
 
 uv tool run --from git+https://github.com/ArcInstitute/cell-eval@main cell-eval prep -i competition/prediction.h5ad -g competition_support_set/gene_names.csv
 python -m src.cell_eval prep -i /home/absking/scratch/vcc/state/competition/prediction.h5ad -g /home/absking/scratch/vcc/state/competition_support_set/gene_names.csv
+uv tool run --from git+https://github.com/ArcInstitute/cell-eval@main cell-eval prep -i competition/prediction.h5ad -g competition_support_set/gene_names.csv
+
+# For VCC evaluation (includes MAE)
+uv tool run --from git+https://github.com/ArcInstitute/cell-eval@main cell-eval run \
+  -ap competition/prediction.h5ad \
+  -ar competition_support_set/competition_val_template.h5ad \
+  --pert-col target_gene \
+  --control-pert non-targeting \
+  --profile vcc \
+  -o vcc_evaluation
+
+# For full evaluation (includes DES, PDS, MAE)
+uv tool run --from git+https://github.com/ArcInstitute/cell-eval@main cell-eval run \
+  -ap competition/prediction.h5ad \
+  -ar competition_support_set/competition_val_template.h5ad \
+  --pert-col target_gene \
+  --control-pert non-targeting \
+  --profile full \
+  -o full_evaluation
 """
   # 1. Get the source
 cd ~/scratch
@@ -239,3 +259,11 @@ export PYTHONPATH="/home/absking/scratch/vcc/cell-load/src:$PYTHONPATH"
 pip install --no-deps huggingface_hub
 
 python -m src.state tx train data.kwargs.toml_config_path="competition_support_set/starter.toml"   data.kwargs.num_workers=4   data.kwargs.batch_col="batch_var"   data.kwargs.pert_col="target_gene"   data.kwargs.cell_type_key="cell_type"   data.kwargs.control_pert="non-targeting"   data.kwargs.perturbation_features_file="competition_support_set/ESM2_pert_features.pt"   training.max_steps=213   training.ckpt_every_n_steps=213 training.val_freq=213 model=causalpfn   wandb.tags="causalpfn"   output_dir="competition"   name="causalpfn"
+
+Using adata.X as input features: shape (98927, 18080)
+Cells: total=98927, control=38176, non-control=60751
+
+
+For evo2: module load python/3.12
+
+python -m src.state tx train data.kwargs.toml_config_path="competition_support_set/starter.toml"   data.kwargs.num_workers=4   data.kwargs.batch_col="batch_var"   data.kwargs.pert_col="target_gene"   data.kwargs.cell_type_key="cell_type"   data.kwargs.control_pert="non-targeting"   data.kwargs.perturbation_features_file="competition_support_set/merged_gene_embeddings.pt"   training.max_steps=32000   training.ckpt_every_n_steps=213 training.val_freq=213 model=causalpfn   wandb.tags="causalpfn"   output_dir="competition"   name="causalpfn"
