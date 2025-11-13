@@ -8,6 +8,7 @@ import torch.nn as nn
 
 from geomloss import SamplesLoss
 from typing import Tuple
+from scipy.stats import spearmanr, pearsonr
 
 from .base import PerturbationModel
 from .decoders import FinetuneVCICountsDecoder
@@ -271,7 +272,7 @@ class CausalPFNModel(PerturbationModel):
         self.tabpfn_context_X = nn.Parameter(torch.randn(2048, 512)).to('cuda')  # 18080 + 5120
         self.tabpfn_context_Y = nn.Parameter(torch.randn(2048, 512)).to('cuda')  # 512
         # self.tabpfn_mdl = TabPFNRegressor(device='cuda',ignore_pretraining_limits=True)
-        loaded = np.load("train_data_esm_evo.npz")  # np.load("train_data.npz")
+        loaded = np.load("train_data.npz") # np.load("train_data_esm_evo.npz")  #
         self.datasets = loaded["X_train"]  #  raw dataset input as context 
         self.targets = loaded["y_train"]   #  
         self.treatments = torch.from_numpy(loaded["t_train"]).to('cuda')
@@ -302,7 +303,7 @@ class CausalPFNModel(PerturbationModel):
         # self.pert_y_encoder = nn.Linear(self.input_dim, 512)  # self.hidden_dim) C*E where C is the number of class tokens, E is the embedding dimension
 
         self.pert_encoder = build_mlp(
-            in_dim=7040, # self.pert_dim,
+            in_dim=self.pert_dim, # 7040, # 
             out_dim=self.hidden_dim,
             hidden_dim=self.hidden_dim,
             n_layers=self.n_encoder_layers,
@@ -490,7 +491,6 @@ class CausalPFNModel(PerturbationModel):
 
         main_loss = self.loss_fn(pred, target).nanmean()  # both: [16, 128, 18080]
         self.log("train_loss", main_loss)
-        print("train_loss", main_loss)
         # Log individual loss components if using combined loss
         if hasattr(self.loss_fn, "sinkhorn_loss") and hasattr(self.loss_fn, "energy_loss"):
             sinkhorn_component = self.loss_fn.sinkhorn_loss(pred, target).nanmean()
@@ -579,7 +579,8 @@ class CausalPFNModel(PerturbationModel):
         pred = pred.reshape(-1, self.cell_sentence_len, self.output_dim)
         target = batch["pert_cell_emb"]
         target = target.reshape(-1, self.cell_sentence_len, self.output_dim)
-
+        ctrl = batch["ctrl_cell_emb"]
+        ctrl = ctrl.reshape(-1, self.cell_sentence_len, self.output_dim)
         loss = self.loss_fn(pred, target).mean()
         self.log("val_loss", loss)
 
@@ -589,6 +590,51 @@ class CausalPFNModel(PerturbationModel):
             energy_component = self.loss_fn.energy_loss(pred, target).mean()
             self.log("val/sinkhorn_loss", sinkhorn_component)
             self.log("val/energy_loss", energy_component)
+
+        # Compute DES, PDS, and MAE metrics
+        # Convert to numpy for metric computation
+        pred_np = pred.detach().cpu().numpy()
+        target_np = target.detach().cpu().numpy()
+        ctrl_np = ctrl.detach().cpu().numpy()
+        
+        # Flatten to (total_cells, output_dim)
+        pred_flat = pred_np.reshape(-1, self.output_dim)
+        target_flat = target_np.reshape(-1, self.output_dim)
+        ctrl_flat = ctrl_np.reshape(-1, self.output_dim)
+        
+        # Compute deltas (perturbation effect = pert - control)
+        pred_delta = pred_flat - ctrl_flat
+        target_delta = target_flat - ctrl_flat
+        
+        # MAE: Mean Absolute Error
+        mae = np.mean(np.abs(pred_flat - target_flat))
+        self.log("val/MAE", mae, prog_bar=True)
+        
+        # DES: Differential Expression Score (Spearman correlation of deltas)
+        # Flatten deltas for correlation computation
+        pred_delta_flat = pred_delta.flatten()
+        target_delta_flat = target_delta.flatten()
+        
+        # Remove any NaN or Inf values
+        valid_mask = np.isfinite(pred_delta_flat) & np.isfinite(target_delta_flat)
+        if np.sum(valid_mask) > 10:  # Need at least 10 valid points
+            des_corr, _ = spearmanr(pred_delta_flat[valid_mask], target_delta_flat[valid_mask])
+            if np.isfinite(des_corr):
+                self.log("val/DES", des_corr, prog_bar=True)
+            else:
+                self.log("val/DES", 0.0)
+        else:
+            self.log("val/DES", 0.0)
+        
+        # PDS: Perturbation Differential Score (Pearson correlation of deltas)
+        if np.sum(valid_mask) > 10:
+            pds_corr, _ = pearsonr(pred_delta_flat[valid_mask], target_delta_flat[valid_mask])
+            if np.isfinite(pds_corr):
+                self.log("val/PDS", pds_corr, prog_bar=True)
+            else:
+                self.log("val/PDS", 0.0)
+        else:
+            self.log("val/PDS", 0.0)
 
         if self.gene_decoder is not None and "pert_cell_counts" in batch:
             gene_targets = batch["pert_cell_counts"]
