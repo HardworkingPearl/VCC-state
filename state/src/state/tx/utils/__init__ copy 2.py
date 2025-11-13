@@ -14,83 +14,10 @@ class RobustCSVLogger(BaseCSVLogger):
     A CSV logger that handles dynamic metrics by allowing new columns to be added during training.
     This fixes the issue where PyTorch Lightning's default CSV logger fails when new metrics
     are added after the CSV file is created.
-    
-    Additionally, this logger preserves existing metrics when resuming from a checkpoint,
-    preventing loss of historical training data.
     """
 
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self._existing_metrics = None
-        self._last_logged_step = None
-        self._preserved_existing_data = False
-        # Load existing metrics if CSV file already exists (checkpoint resumption)
-        self._load_existing_metrics()
-
-    def _load_existing_metrics(self):
-        """Load existing metrics from CSV file if it exists (for checkpoint resumption)"""
-        if not hasattr(self.experiment, "metrics_file_path"):
-            return
-
-        csv_file = self.experiment.metrics_file_path
-        if os.path.exists(csv_file) and os.path.getsize(csv_file) > 0:
-            try:
-                existing_data = []
-                with open(csv_file, "r", newline="") as f:
-                    reader = csv.DictReader(f)
-                    existing_data = list(reader)
-
-                if existing_data:
-                    self._existing_metrics = existing_data
-                    # Find the last logged step to avoid duplicates
-                    steps = []
-                    for row in existing_data:
-                        step_str = row.get("step", "")
-                        if step_str and step_str.strip():
-                            try:
-                                steps.append(int(float(step_str)))
-                            except (ValueError, TypeError):
-                                pass
-                    if steps:
-                        self._last_logged_step = max(steps)
-                        logging.info(
-                            f"RobustCSVLogger: Found existing metrics with {len(existing_data)} rows. "
-                            f"Last logged step: {self._last_logged_step}. Will preserve existing data."
-                        )
-            except Exception as e:
-                logging.warning(f"RobustCSVLogger: Failed to load existing metrics: {e}")
-
     def log_metrics(self, metrics, step):
-        """Override to handle dynamic metrics gracefully and preserve existing data on resume"""
-        # Check if we need to preserve existing metrics (first log after resumption)
-        # This must happen BEFORE calling super().log_metrics() to prevent the base logger
-        # from overwriting the existing data
-        if (
-            self._existing_metrics is not None
-            and not self._preserved_existing_data
-            and hasattr(self.experiment, "metrics_file_path")
-        ):
-            # Check if file was cleared (e.g., by base logger initialization)
-            csv_file = self.experiment.metrics_file_path
-            if os.path.exists(csv_file):
-                # Read current file to see if it was cleared
-                try:
-                    with open(csv_file, "r", newline="") as f:
-                        reader = csv.DictReader(f)
-                        current_data = list(reader)
-                    # If file was cleared or has less data than we loaded, restore it
-                    if len(current_data) < len(self._existing_metrics):
-                        logging.warning(
-                            f"RobustCSVLogger: CSV file appears to have been cleared. "
-                            f"Restoring {len(self._existing_metrics)} existing rows."
-                        )
-                except Exception:
-                    pass  # File might be in an inconsistent state, we'll restore it
-            
-            # Preserve existing metrics before base logger can overwrite
-            self._preserve_existing_metrics(metrics)
-            self._preserved_existing_data = True
-
+        """Override to handle dynamic metrics gracefully"""
         try:
             super().log_metrics(metrics, step)
         except ValueError as e:
@@ -101,43 +28,6 @@ class RobustCSVLogger(BaseCSVLogger):
                 super().log_metrics(metrics, step)
             else:
                 raise e
-
-    def _preserve_existing_metrics(self, new_metrics):
-        """
-        Preserve existing metrics when resuming from checkpoint.
-        This ensures historical training data is not lost.
-        """
-        if not hasattr(self.experiment, "metrics_file_path"):
-            return
-
-        csv_file = self.experiment.metrics_file_path
-
-        # Get all unique fieldnames from existing data and new metrics
-        all_fieldnames = set()
-        for row in self._existing_metrics:
-            all_fieldnames.update(row.keys())
-        all_fieldnames.update(new_metrics.keys())
-
-        # Sort fieldnames for consistent ordering
-        sorted_fieldnames = sorted(all_fieldnames)
-
-        # Rewrite the CSV file with all fieldnames, preserving existing data
-        with open(csv_file, "w", newline="") as f:
-            writer = csv.DictWriter(f, fieldnames=sorted_fieldnames)
-            writer.writeheader()
-
-            # Write existing data (missing fields will be empty)
-            for row in self._existing_metrics:
-                writer.writerow(row)
-
-        # Update the experiment's fieldnames
-        if hasattr(self.experiment, "metrics_keys"):
-            self.experiment.metrics_keys = sorted_fieldnames
-
-        logging.info(
-            f"RobustCSVLogger: Preserved {len(self._existing_metrics)} existing metric rows "
-            f"when resuming from checkpoint."
-        )
 
     def _recreate_csv_with_new_fields(self, new_metrics):
         """Recreate the CSV file with additional fields to accommodate new metrics"""

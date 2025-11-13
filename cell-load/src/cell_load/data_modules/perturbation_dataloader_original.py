@@ -409,7 +409,6 @@ class PerturbationDataModule(LightningDataModule):
 
             for _fname, fpath in files.items():
                 with h5py.File(fpath, "r") as f:
-                    breakpoint()
                     pert_arr = f[f"obs/{self.pert_col}/categories"][:]
                     perts = set(safe_decode_array(pert_arr))
                     all_perts.update(perts)

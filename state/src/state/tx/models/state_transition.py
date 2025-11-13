@@ -541,7 +541,7 @@ class StateTransitionPerturbationModel(PerturbationModel):
         pred = pred.reshape(-1, self.cell_sentence_len, self.output_dim)
         target = batch["pert_cell_emb"]
         target = target.reshape(-1, self.cell_sentence_len, self.output_dim)
-
+        breakpoint()
         loss = self.loss_fn(pred, target).mean()
         self.log("val_loss", loss)
 
