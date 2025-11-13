@@ -432,16 +432,44 @@ class PerturbationDataModule(LightningDataModule):
                         celltypes = set(safe_decode_array(celltype_arr))
                         all_celltypes.update(celltypes)
                     elif dataset_name == "mcfaline":
-                        pert_arr = f["obs/gene_id"][:]
+                        obs = f["obs"]
+
+                        if "gene_id" in obs:
+                            pert_ds = obs["gene_id"]
+                        else:
+                            pert_ds = obs["treatment"]
+
+                        if "categories" in pert_ds:
+                            pert_arr = pert_ds["categories"][:]
+                        else:
+                            pert_arr = pert_ds[:]
+
                         perts = set(safe_decode_array(pert_arr))
                         all_perts.update(perts)
 
-                        batch_arr = f[
-                            "obs/PCR_plate"][:]  # sample or PCR_plate
+                        if "PCR_plate" in obs:
+                            batch_ds = obs["PCR_plate"]
+                        else:
+                            batch_ds = obs["sample"]
+
+                        if "categories" in batch_ds:
+                            batch_arr = batch_ds["categories"][:]
+                        else:
+                            batch_arr = batch_ds[:]
+
                         batches = set(safe_decode_array(batch_arr))
                         all_batches.update(batches)
 
-                        celltypes = {"A172"}
+                        if "GSC_line" in obs:
+                            ct_ds = obs["GSC_line"]
+                            if "categories" in ct_ds:
+                                celltype_arr = ct_ds["categories"][:]
+                            else:
+                                celltype_arr = ct_ds[:]
+                            celltypes = set(safe_decode_array(celltype_arr))
+                        else:
+                            celltypes = {"A172"}
+
                         all_celltypes.update(celltypes)
                     elif dataset_name in ["srivatsam"]:
                         batch_arr = f[f"obs/sample/categories"][:]

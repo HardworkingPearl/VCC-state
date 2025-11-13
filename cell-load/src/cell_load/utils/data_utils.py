@@ -1,587 +1,844 @@
 import logging
-import warnings
+import glob
+import re
 
-import anndata
+from functools import partial
+from pathlib import Path
+from typing import Literal, Set, Dict
+
 import h5py
 import numpy as np
-import scipy.sparse as sp
 import torch
+from lightning.pytorch import LightningDataModule 
+from torch.utils.data import DataLoader, Dataset
+from tqdm import tqdm
 
-from .singleton import Singleton
+from ..config import ExperimentConfig
+from ..dataset import MetadataConcatDataset, PerturbationDataset
+from ..mapping_strategies import BatchMappingStrategy, RandomMappingStrategy
+from ..utils.data_utils import (
+    GlobalH5MetadataCache,
+    generate_onehot_map,
+    safe_decode_array,
+)
+from .samplers import PerturbationBatchSampler
 
-log = logging.getLogger(__name__)
+logger = logging.getLogger(__name__)
+##### cell_load/data_modules/perturbation_dataloader.py
 
-warnings.filterwarnings("ignore")
 
-
-############## cell_load/utils/data_utils.py
-class H5MetadataCache:
-    """Cache for H5 file metadata to avoid repeated disk reads."""
+class PerturbationDataModule(LightningDataModule):
+    """
+    A unified data module that sets up train/val/test splits for multiple dataset/celltype
+    combos. Allows zero-shot, few-shot tasks, and uses a pluggable mapping strategy
+    (batch, random, nearest) to match perturbed cells with control cells.
+    """
 
     def __init__(
         self,
-        h5_path: str,
-        pert_col: str = "drug",
-        cell_type_key: str = "cell_name",
-        control_pert: str = "DMSO_TF",
-        batch_col: str = "sample",
+        toml_config_path: str,
+        batch_size: int = 128,
+        num_workers: int = 8,
+        random_seed: int = 42,  # this should be removed by seed everything
+        pert_col: str = "gene",
+        batch_col: str = "gem_group",
+        cell_type_key: str = "cell_type",
+        control_pert: str = "non-targeting",
+        embed_key: Literal["X_hvg", "X_state"] | None = None,
+        output_space: Literal["gene", "all"] = "gene",
+        basal_mapping_strategy: Literal["batch", "random"] = "random",
+        n_basal_samples: int = 1,
+        should_yield_control_cells: bool = True,
+        cell_sentence_len: int = 512,
+        cache_perturbation_control_pairs: bool = False,
+        drop_last: bool = False,
+        **
+        kwargs,  # missing perturbation_features_file  and store_raw_basal for backwards compatibility
     ):
         """
+        This class is responsible for serving multiple PerturbationDataset's each of which is specific
+        to a dataset/cell type combo. It sets up training, validation, and test splits for each dataset
+        and cell type, and uses a pluggable mapping strategy to match perturbed cells with control cells.
+
         Args:
-            h5_path: Path to the .h5ad or .h5 file
-            pert_col: obs column name for perturbation
-            cell_type_key: obs column name for cell type
-            control_pert: the perturbation to treat as control
-            batch_col: obs column name for batch/plate
+            toml_config_path: Path to TOML configuration file
+            batch_size: Batch size for PyTorch DataLoader
+            num_workers: Num workers for PyTorch DataLoader
+            few_shot_percent: Fraction of data to use for few-shot tasks
+            random_seed: For reproducible splits & sampling
+            embed_key: Embedding key or matrix in the H5 file to use for feauturizing cells
+            output_space: The output space for model predictions (gene or latent, which uses embed_key)
+            basal_mapping_strategy: One of {"batch","random","nearest","ot"}
+            n_basal_samples: Number of control cells to sample per perturbed cell
+            cache_perturbation_control_pairs: If True cache perturbation-control pairs at the start of training and reuse them.
+            drop_last: Whether to drop the last sentence set if it is smaller than cell_sentence_len
         """
-        self.h5_path = h5_path
-        with h5py.File(h5_path, "r") as f:
-            obs = f["obs"]
-            # -- Categories --
-            ### TODO: SJQ + a dataset branch
-            # breakpoint()
-            if "pbmcs" in h5_path:
-                self.pert_categories = safe_decode_array(
-                    obs['cytokine/categories'][:])
-                self.cell_type_categories = safe_decode_array(
-                    obs[cell_type_key]["categories"][:])
-                batch_ds = obs["sample"]
-                if "categories" in batch_ds:
-                    self.batch_is_categorical = True
-                    self.batch_categories = safe_decode_array(
-                        batch_ds["categories"][:])
-                    self.batch_codes = batch_ds["codes"][:].astype(np.int32)
-                else:
-                    self.batch_is_categorical = False
-                    raw = batch_ds[:]
-                    self.batch_categories = raw.astype(str)
-                    self.batch_codes = raw.astype(np.int32)
-                # -- Codes for pert & cell type --
-                self.pert_codes = obs['cytokine']["codes"][:].astype(np.int32)
-                self.cell_type_codes = obs[cell_type_key]["codes"][:].astype(
-                    np.int32)
-                # -- Control mask & counts --
-                idx = np.where(self.pert_categories == "PBS")[0]
-                if idx.size == 0:
-                    raise ValueError(
-                        f"control_pert='{control_pert}' not found in {pert_col} categories"
-                    )
-                self.control_pert_code = int(idx[0])
-                self.control_mask = self.pert_codes == self.control_pert_code
-            elif "Seurat" in h5_path:
+        super().__init__()
 
-                # self.pert_categories = safe_decode_array(set(obs['gene'][:]))
-                # self.cell_type_categories = safe_decode_array(
-                #     set(obs[cell_type_key][:])
-                # )
-                self.pert_categories, self.pert_codes = np.unique(
-                    obs['gene'][:], return_inverse=True)
-                self.cell_type_categories, self.cell_type_codes = np.unique(
-                    obs[cell_type_key][:], return_inverse=True)
+        # Load and validate configuration
+        self.toml_config_path = toml_config_path
+        self.config = ExperimentConfig.from_toml(toml_config_path)
+        self.config.validate()
 
-                self.batch_categories, self.batch_codes = np.unique(
-                    obs['Batch_info'][:], return_inverse=True)
-                self.batch_is_categorical = True
-                # raw = batch_ds[:]
-                # self.batch_categories = raw.astype(str)
-                # self.batch_codes = raw # .astype(np.int32)
-                # -- Codes for pert & cell type --
-                # self.pert_codes = obs['gene'][:]  # .astype(np.int32)
-                # self.cell_type_codes = obs[cell_type_key][:] # .astype(np.int32)
+        # Experiment level params
+        self.batch_size = batch_size
+        self.num_workers = num_workers
+        self.random_seed = random_seed
+        self.rng = np.random.default_rng(random_seed)
+        self.drop_last = drop_last
 
-                # -- Control mask & counts --
-                idx = np.where(self.pert_categories == b"NT")[0]
-                if idx.size == 0:
-                    raise ValueError(
-                        f"control_pert='{control_pert}' not found in {pert_col} categories"
-                    )
-                self.control_pert_code = int(idx[0])
-                self.control_mask = self.pert_codes == self.control_pert_code
-            elif "mcfaline" in h5_path:
-                pert_ds = obs["gene_id"]
+        # H5 field names
+        self.pert_col = pert_col
+        self.batch_col = batch_col
+        self.cell_type_key = cell_type_key
+        self.control_pert = control_pert
+        self.embed_key = embed_key
+        self.output_space = output_space
 
-                if "categories" in pert_ds:
-                    self.pert_categories = safe_decode_array(
-                        pert_ds["categories"][:])
-                    self.pert_codes = pert_ds["codes"][:].astype(np.int32)
-                else:
-                    raw = pert_ds[:]
-                    cats, codes = np.unique(raw, return_inverse=True)
-                    self.pert_categories = safe_decode_array(cats)
-                    self.pert_codes = codes.astype(np.int32)
+        # Sampling and mapping
+        self.n_basal_samples = n_basal_samples
+        self.cell_sentence_len = cell_sentence_len
+        self.should_yield_control_cells = should_yield_control_cells
+        self.cache_perturbation_control_pairs = cache_perturbation_control_pairs
 
-                # ---- Cell type / cell line ----
-                # If you have a proper cell_type_key in obs, use it; otherwise fall back to one dummy type.
-                if cell_type_key in obs:
-                    ct_ds = obs[cell_type_key]
-                    if "categories" in ct_ds:
-                        self.cell_type_categories = safe_decode_array(
-                            ct_ds["categories"][:])
-                        self.cell_type_codes = ct_ds["codes"][:].astype(
-                            np.int32)
-                    else:
-                        raw = ct_ds[:]
-                        cats, codes = np.unique(raw, return_inverse=True)
-                        self.cell_type_categories = safe_decode_array(cats)
-                        self.cell_type_codes = codes.astype(np.int32)
-                else:
-                    n_cells = obs["PCR_plate"].shape[0]
-                    self.cell_type_categories = np.array(["A172"],
-                                                         dtype=object)
-                    self.cell_type_codes = np.zeros(n_cells, dtype=np.int32)
+        # Optional behaviors
+        self.map_controls = kwargs.get("map_controls", True)
+        self.perturbation_features_file = kwargs.get(
+            "perturbation_features_file")
+        self.int_counts = kwargs.get("int_counts", False)
+        self.normalize_counts = kwargs.get("normalize_counts", False)
+        self.store_raw_basal = kwargs.get("store_raw_basal", False)
+        self.barcode = kwargs.get("barcode", False)
 
-                # ---- Batch: sample or PCR_plate ----
-                batch_ds = obs["PCR_plate"]
-                if "categories" in batch_ds:
-                    self.batch_is_categorical = True
-                    self.batch_categories = safe_decode_array(
-                        batch_ds["categories"][:])
-                    self.batch_codes = batch_ds["codes"][:].astype(np.int32)
-                else:
-                    self.batch_is_categorical = False
-                    raw = batch_ds[:]
-                    self.batch_categories = raw.astype(str)
-                    self.batch_codes = raw.astype(np.int32)
+        logger.info(
+            f"Initializing DataModule: batch_size={batch_size}, workers={num_workers}, "
+            f"random_seed={random_seed}")
 
-                # -- Control mask & counts --
-                ctrl = control_pert.decode() if isinstance(
-                    control_pert, bytes) else control_pert
-                idx = np.where(self.pert_categories == ctrl)[0]
-                if idx.size == 0:
-                    raise ValueError(
-                        f"control_pert='{control_pert}' not found in {pert_col} categories: "
-                        f"{self.pert_categories}")
-                self.control_pert_code = int(idx[0])
-                self.control_mask = self.pert_codes == self.control_pert_code
-            elif "srivatsam" in h5_path:
-                self.pert_categories = safe_decode_array(
-                    obs["treatment/categories"][:])
-                self.cell_type_categories = safe_decode_array(
-                    obs[cell_type_key]["categories"][:])
+        # Mapping strategy
+        self.basal_mapping_strategy = basal_mapping_strategy
+        self.mapping_strategy_cls = {
+            "batch": BatchMappingStrategy,
+            "random": RandomMappingStrategy,
+        }[basal_mapping_strategy]
 
-                batch_ds = obs["sample"]
-                if "categories" in batch_ds:
-                    self.batch_is_categorical = True
-                    self.batch_categories = safe_decode_array(
-                        batch_ds["categories"][:])
-                    self.batch_codes = batch_ds["codes"][:].astype(np.int32)
-                else:
-                    self.batch_is_categorical = False
-                    raw = batch_ds[:]
-                    self.batch_categories = raw.astype(str)
-                    self.batch_codes = raw.astype(np.int32)
+        # Determine if raw expression is needed
+        self.store_raw_expression = bool(
+            self.embed_key
+            and ((self.embed_key != "X_hvg" and self.output_space == "gene")
+                 or self.output_space == "all"))
 
-                # -- Codes for pert & cell type --
-                self.pert_codes = obs["treatment"]["codes"][:].astype(np.int32)
-                self.cell_type_codes = obs[cell_type_key]["codes"][:].astype(
-                    np.int32)
+        # Prepare dataset lists and maps
+        self.train_datasets: list[Dataset] = []
+        self.val_datasets: list[Dataset] = []
+        self.test_datasets: list[Dataset] = []
 
-                # -- Control mask & counts --
-                idx = np.where(self.pert_categories == control_pert)[0]
-                if idx.size == 0:
-                    raise ValueError(
-                        f"control_pert='{control_pert}' not found in {pert_col} categories"
-                    )
-                self.control_pert_code = int(idx[0])
-                self.control_mask = self.pert_codes == self.control_pert_code
-            else:
-                self.pert_categories = safe_decode_array(
-                    obs[pert_col]["categories"][:])
-                self.cell_type_categories = safe_decode_array(
-                    obs[cell_type_key]["categories"][:])
+        self.all_perts: Set[str] = set()
+        self.pert_onehot_map: dict[str, torch.Tensor] | None = None
+        self.batch_onehot_map: dict[str, torch.Tensor] | None = None
+        self.cell_type_onehot_map: dict[str, torch.Tensor] | None = None
 
-                # -- Batch: handle categorical vs numeric storage --
-                batch_ds = obs[batch_col]
-                if "categories" in batch_ds:
-                    self.batch_is_categorical = True
-                    self.batch_categories = safe_decode_array(
-                        batch_ds["categories"][:])
-                    self.batch_codes = batch_ds["codes"][:].astype(np.int32)
-                else:
-                    self.batch_is_categorical = False
-                    raw = batch_ds[:]
-                    self.batch_categories = raw.astype(str)
-                    self.batch_codes = raw.astype(np.int32)
+        # Initialize global maps
+        self._setup_global_maps()
 
-                # -- Codes for pert & cell type --
-                self.pert_codes = obs[pert_col]["codes"][:].astype(np.int32)
-                self.cell_type_codes = obs[cell_type_key]["codes"][:].astype(
-                    np.int32)
+    def get_var_names(self):
+        """
+        Get the variable names (gene names) from the first dataset.
+        This assumes all datasets have the same gene names.
+        """
+        if len(self.test_datasets) == 0:
+            raise ValueError(
+                "No test datasets available to extract variable names.")
+        underlying_ds: PerturbationDataset = self.test_datasets[0].dataset
+        return underlying_ds.get_gene_names(output_space=self.output_space)
 
-                # -- Control mask & counts --
-                idx = np.where(self.pert_categories == control_pert)[0]
-                if idx.size == 0:
-                    raise ValueError(
-                        f"control_pert='{control_pert}' not found in {pert_col} categories"
-                    )
-                self.control_pert_code = int(idx[0])
-                self.control_mask = self.pert_codes == self.control_pert_code
+    def setup(self, stage: str | None = None):
+        """
+        Set up training and test datasets.
+        """
+        if len(self.train_datasets) == 0:
+            self._setup_datasets()
+            logger.info(
+                "Done! Train / Val / Test splits: %d / %d / %d",
+                len(self.train_datasets),
+                len(self.val_datasets),
+                len(self.test_datasets),
+            )
 
-            self.n_cells = len(self.pert_codes)
+    def save_state(self, filepath: str):
+        """
+        Save the data module configuration to a torch file.
+        This saves only the initialization parameters, not the computed splits for the datasets.
 
-    def get_batch_names(self, indices: np.ndarray) -> np.ndarray:
-        """Return batch labels for the provided cell indices."""
-        return self.batch_categories[indices]
+        Args:
+            filepath: Path where to save the configuration (should end with .torch)
+        """
+        save_dict = {
+            "toml_config_path": self.toml_config_path,
+            "batch_size": self.batch_size,
+            "num_workers": self.num_workers,
+            "random_seed": self.random_seed,
+            "pert_col": self.pert_col,
+            "batch_col": self.batch_col,
+            "cell_type_key": self.cell_type_key,
+            "control_pert": self.control_pert,
+            "embed_key": self.embed_key,
+            "output_space": self.output_space,
+            "basal_mapping_strategy": self.basal_mapping_strategy,
+            "n_basal_samples": self.n_basal_samples,
+            "should_yield_control_cells": self.should_yield_control_cells,
+            "cell_sentence_len": self.cell_sentence_len,
+            "cache_perturbation_control_pairs":
+            self.cache_perturbation_control_pairs,
+            # Include the optional behaviors
+            "map_controls": self.map_controls,
+            "perturbation_features_file": self.perturbation_features_file,
+            "int_counts": self.int_counts,
+            "normalize_counts": self.normalize_counts,
+            "store_raw_basal": self.store_raw_basal,
+            "barcode": self.barcode,
+        }
 
-    def get_cell_type_names(self, indices: np.ndarray) -> np.ndarray:
-        """Return cell‐type labels for the provided cell indices."""
-        return self.cell_type_categories[indices]
+        torch.save(save_dict, filepath)
+        logger.info(f"Saved data module configuration to {filepath}")
 
-    def get_pert_names(self, indices: np.ndarray) -> np.ndarray:
-        """Return perturbation labels for the provided cell indices."""
-        return self.pert_categories[indices]
+    @classmethod
+    def load_state(cls, filepath: str):
+        """
+        Load a data module from a saved torch file.
+        This reconstructs the data module with the original initialization parameters.
+        You will need to call setup() after loading to recreate the datasets.
 
+        Args:
+            filepath: Path to the saved configuration file
 
-class GlobalH5MetadataCache(metaclass=Singleton):
-    """
-    Singleton managing a shared dict of H5MetadataCache instances.
-    Keys by h5_path only (same as before).
-    """
+        Returns:
+            PerturbationDataModule: A new instance with the saved configuration
+        """
+        save_dict = torch.load(filepath, map_location="cpu")
+        logger.info(f"Loaded data module configuration from {filepath}")
 
-    def __init__(self):
-        self._cache: dict[str, H5MetadataCache] = {}
+        # Validate that the toml config file still exists
+        toml_path = Path(save_dict["toml_config_path"])
+        if not toml_path.exists():
+            logger.warning(f"TOML config file not found at {toml_path}. "
+                           "Make sure the file exists or the path is correct.")
 
-    def get_cache(
+        # Extract the kwargs that were passed to __init__
+        kwargs = {
+            "map_controls":
+            save_dict.pop("map_controls", True),
+            "cache_perturbation_control_pairs":
+            save_dict.pop("cache_perturbation_control_pairs", False),
+            "perturbation_features_file":
+            save_dict.pop("perturbation_features_file", None),
+            "int_counts":
+            save_dict.pop("int_counts", False),
+            "normalize_counts":
+            save_dict.pop("normalize_counts", False),
+            "store_raw_basal":
+            save_dict.pop("store_raw_basal", False),
+            "barcode":
+            save_dict.pop("barcode", True),
+        }
+
+        # Create new instance with all the saved parameters
+        return cls(**save_dict, **kwargs)
+
+    def get_var_dims(self):
+        underlying_ds: PerturbationDataset = self.test_datasets[0].dataset
+        if self.embed_key:
+            input_dim = underlying_ds.get_dim_for_obsm(self.embed_key)
+        else:
+            input_dim = underlying_ds.n_genes
+
+        gene_dim = underlying_ds.n_genes
+        try:
+            hvg_dim = underlying_ds.get_num_hvgs()
+        except AttributeError:
+            assert self.embed_key is None, "No X_hvg detected, using raw .X"
+            hvg_dim = gene_dim
+
+        if self.embed_key is not None:
+            output_dim = underlying_ds.get_dim_for_obsm(self.embed_key)
+        else:
+            output_dim = input_dim  # training on raw gene expression
+
+        gene_names = underlying_ds.get_gene_names(
+            output_space=self.output_space)
+
+        # get the shape of the first value in pert_onehot_map
+        pert_dim = next(iter(self.pert_onehot_map.values())).shape[0]
+        batch_dim = next(iter(self.batch_onehot_map.values())).shape[0]
+
+        pert_names = list(self.pert_onehot_map.keys())
+
+        return {
+            "input_dim": input_dim,
+            "gene_dim": gene_dim,
+            "hvg_dim": hvg_dim,
+            "output_dim": output_dim,
+            "pert_dim": pert_dim,
+            "gene_names": gene_names,
+            "batch_dim": batch_dim,
+            "pert_names": pert_names,
+        }
+
+    def get_shared_perturbations(self) -> Set[str]:
+        """
+        Compute shared perturbations between train and test sets by inspecting
+        only the actual subset indices in self.train_datasets and self.test_datasets.
+
+        This ensures we don't accidentally include all perturbations from the entire h5 file.
+        """
+
+        def _extract_perts_from_subset(subset) -> Set[str]:
+            """
+            Helper that returns the set of perturbation names for the
+            exact subset indices in 'subset'.
+            """
+            ds = subset.dataset  # The underlying PerturbationDataset
+            idxs = subset.indices  # The subset of row indices relevant to this Subset
+
+            # ds.pert_col typically is 'gene' or similar
+            pert_codes = ds.metadata_cache.pert_codes[idxs]
+            # Convert each code to its corresponding string label
+            pert_names = ds.pert_categories[pert_codes]
+
+            return set(pert_names)
+
+        # 1) Gather all perturbations found across the *actual training subsets*
+        train_perts = set()
+        for subset in self.train_datasets:
+            train_perts.update(_extract_perts_from_subset(subset))
+
+        # 2) Gather all perturbations found across the *actual testing subsets*
+        test_perts = set()
+        for subset in self.test_datasets:
+            test_perts.update(_extract_perts_from_subset(subset))
+
+        # 3) Intersection = shared across both train and test
+        shared_perts = train_perts & test_perts
+
+        logger.info(
+            f"Found {len(train_perts)} distinct perts in the train subsets.")
+        logger.info(
+            f"Found {len(test_perts)} distinct perts in the test subsets.")
+        logger.info(
+            f"Found {len(shared_perts)} shared perturbations (train ∩ test).")
+
+        return shared_perts
+
+    def get_control_pert(self):
+        # Return the control perturbation name
+        return self.train_datasets[0].dataset.control_pert
+
+    def train_dataloader(self, test=False):
+        if len(self.train_datasets) == 0:
+            raise ValueError(
+                "No training datasets available. Please call setup() first.")
+        return self._create_dataloader(self.train_datasets, test=test)
+
+    def val_dataloader(self):
+        if len(self.val_datasets) == 0:
+            return self._create_dataloader(self.test_datasets, test=False)
+        return self._create_dataloader(self.val_datasets, test=False)
+
+    def test_dataloader(self):
+        if len(self.test_datasets) == 0:
+            return None
+        return self._create_dataloader(self.test_datasets,
+                                       test=True,
+                                       batch_size=1)
+
+    def predict_dataloader(self):
+        if len(self.test_datasets) == 0:
+            return None
+        return self._create_dataloader(self.test_datasets, test=True)
+
+    # Helper functions to set up global maps and datasets
+
+    def _create_dataloader(
         self,
-        h5_path: str,
-        pert_col: str = "drug",
-        cell_type_key: str = "cell_name",
-        control_pert: str = "DMSO_TF",
-        batch_col: str = "drug",
-    ) -> H5MetadataCache:
+        datasets: list[Dataset],
+        test: bool = False,
+        batch_size: int | None = None,
+    ):
+        """Create a DataLoader with appropriate configuration."""
+        use_int_counts = "int_counts" in self.__dict__ and self.int_counts
+        collate_fn = partial(PerturbationDataset.collate_fn,
+                             int_counts=use_int_counts)
+
+        ds = MetadataConcatDataset(datasets)
+        use_batch = self.basal_mapping_strategy == "batch"
+
+        batch_size = batch_size or (1 if test else self.batch_size)
+
+        sampler = PerturbationBatchSampler(
+            dataset=ds,
+            batch_size=batch_size,
+            drop_last=self.drop_last,
+            cell_sentence_len=self.cell_sentence_len,
+            test=test,
+            use_batch=use_batch,
+        )
+
+        return DataLoader(
+            ds,
+            batch_sampler=sampler,
+            num_workers=self.num_workers,
+            collate_fn=collate_fn,
+            pin_memory=True,
+            prefetch_factor=4 if not test and self.num_workers > 0 else None,
+        )
+
+    def _setup_global_maps(self):
         """
-        If a cache for this file doesn’t yet exist, create it with the
-        given parameters; otherwise return the existing one.
+        Set up global one-hot maps for perturbations and batches.
+        For perturbations, we scan through all files in all train_specs and test_specs.
         """
-        if h5_path not in self._cache:
-            self._cache[h5_path] = H5MetadataCache(h5_path, pert_col,
-                                                   cell_type_key, control_pert,
-                                                   batch_col)
-        return self._cache[h5_path]
+        all_perts = set()
+        all_batches = set()
+        all_celltypes = set()
+        for dataset_name in self.config.get_all_datasets():
+            dataset_path = Path(self.config.datasets[dataset_name])
+            files = self._find_dataset_files(dataset_path)
+            for _fname, fpath in files.items():
+                print(fpath)
+                # breakpoint()
+                with h5py.File(fpath, "r") as f:
+                    # TODO: SJQ + branch:
+                    if dataset_name == "pbmcs":
+                        batch_arr = f[f"obs/sample/categories"][:]
+                        batches = set(safe_decode_array(batch_arr))
+                        try:
+                            celltype_arr = f[
+                                f"obs/{self.cell_type_key}/categories"][:]
+                        except KeyError:
+                            celltype_arr = f[f"obs/{self.cell_type_key}"][:]
+                        celltypes = set(safe_decode_array(celltype_arr))
 
+                        all_batches.update(batches)
+                        all_celltypes.update(celltypes)
+                    elif dataset_name == "seurat":
+                        pert_arr = f[f"obs/gene"][:]
+                        perts = set(safe_decode_array(pert_arr))
+                        all_perts.update(perts)
 
-def safe_decode_array(arr) -> np.ndarray:
-    """
-    Decode any byte-strings in `arr` to UTF-8 and cast all entries to Python str.
+                        batch_arr = f[f"obs/Batch_info"][:]
+                        batches = set(safe_decode_array(batch_arr))
+                        celltype_arr = f[f"obs/{self.cell_type_key}"][:]
 
-    Args:
-        arr: array-like of bytes or other objects
-    Returns:
-        np.ndarray[str]: decoded strings
-    """
-    decoded = []
-    for x in arr:
-        if isinstance(x, (bytes, bytearray)):
-            # decode bytes, ignoring errors
-            decoded.append(x.decode("utf-8", errors="ignore"))
+                        all_batches.update(batches)
+                        celltypes = set(safe_decode_array(celltype_arr))
+                        all_celltypes.update(celltypes)
+                    elif dataset_name == "mcfaline":
+                      obs = f["obs"]
+
+                      if "gene_id" in obs:
+                        pert_ds = obs["gene_id"]
+                      else:
+                        pert_ds = obs["treatment"]
+
+                      if "categories" in pert_ds:
+                        pert_arr = pert_ds["categories"][:]
+                      else:
+                        pert_arr = pert_ds[:]
+
+                      perts = set(safe_decode_array(pert_arr))
+                      all_perts.update(perts)
+
+                      if "PCR_plate" in obs:
+                        batch_ds = obs["PCR_plate"]
+                      else:
+                        batch_ds = obs["sample"]
+
+                      if "categories" in batch_ds:
+                        batch_arr = batch_ds["categories"][:]
+                      else:
+                        batch_arr = batch_ds[:]
+
+                      batches = set(safe_decode_array(batch_arr))
+                      all_batches.update(batches)
+
+                      if "GSC_line" in obs:
+                        ct_ds = obs["GSC_line"]
+                        if "categories" in ct_ds:
+                          celltype_arr = ct_ds["categories"][:]
+                        else:
+                          celltype_arr = ct_ds[:]
+                        celltypes = set(safe_decode_array(celltype_arr))
+                      else:
+                        celltypes = {"A172"}
+
+                      all_celltypes.update(celltypes)
+                    elif dataset_name in ["srivatsam"]:
+                        batch_arr = f[f"obs/sample/categories"][:]
+                        batches = set(safe_decode_array(batch_arr))
+                        try:
+                            celltype_arr = f[
+                                f"obs/{self.cell_type_key}/categories"][:]
+                        except KeyError:
+                            celltype_arr = f[f"obs/{self.cell_type_key}"][:]
+                        celltypes = set(safe_decode_array(celltype_arr))
+
+                        all_batches.update(batches)
+                        all_celltypes.update(celltypes)
+                    else:
+                        pert_arr = f[f"obs/{self.pert_col}/categories"][:]
+                        perts = set(safe_decode_array(pert_arr))
+                        all_perts.update(perts)  # pert gene names
+
+                        try:
+                            batch_arr = f[
+                                f"obs/{self.batch_col}/categories"][:]
+                        except KeyError:
+                            batch_arr = f[f"obs/{self.batch_col}"][:]
+                        batches = set(safe_decode_array(batch_arr))
+
+                        try:
+                            celltype_arr = f[
+                                f"obs/{self.cell_type_key}/categories"][:]
+                        except KeyError:
+                            celltype_arr = f[f"obs/{self.cell_type_key}"][:]
+
+                        all_batches.update(batches)
+                        celltypes = set(safe_decode_array(celltype_arr))
+                        all_celltypes.update(celltypes)
+        # breakpoint()
+        # Create one-hot mapsj
+        if self.perturbation_features_file:
+            # Load the custom featurizations from a torch file
+            featurization_dict = torch.load(
+                self.perturbation_features_file
+            )  # missing? -> 0! {np.str_('non-targeting'), np.str_('TAZ')}
+            # Validate that every perturbation in all_perts is in the featurization dict.
+            missing = all_perts - set(featurization_dict.keys())
+            if len(missing) > 0:
+                feature_dim = next(iter(featurization_dict.values())).shape[-1]
+                for pert in missing:
+                    featurization_dict[pert] = torch.zeros(feature_dim)
+
+                logger.info("Set %d missing perturbations to zero vectors.",
+                            len(missing))
+
+            logger.info(
+                "Loaded custom perturbation featurizations for %d perturbations.",
+                len(featurization_dict),
+            )
+            self.pert_onehot_map = featurization_dict  # use the custom featurizations
         else:
-            decoded.append(str(x))
-    return np.array(decoded, dtype=str)
+            # Fall back to default: generate one-hot mapping
+            self.pert_onehot_map = generate_onehot_map(all_perts)
 
+        self.batch_onehot_map = generate_onehot_map(all_batches)
+        self.cell_type_onehot_map = generate_onehot_map(all_celltypes)
 
-def generate_onehot_map(keys) -> dict:
-    """
-    Build a map from each unique key to a fixed-length one-hot torch vector.
+    def _create_base_dataset(self, dataset_name: str,
+                             fpath: Path) -> PerturbationDataset:
+        """Create a base PerturbationDataset instance."""
+        mapping_kwargs = {"map_controls": self.map_controls}
 
-    Args:
-        keys: iterable of hashable items
-    Returns:
-        dict[key, torch.FloatTensor]: one-hot encoding of length = number of unique keys
-    """
-    unique_keys = sorted(set(keys))
-    num_classes = len(unique_keys)
-    # identity matrix rows are one-hot vectors
-    onehots = torch.eye(num_classes)
-    return {k: onehots[i] for i, k in enumerate(unique_keys)}
+        # Add cache_perturbation_control_pairs to mapping strategy kwargs
+        mapping_kwargs["cache_perturbation_control_pairs"] = (
+            self.cache_perturbation_control_pairs)
 
+        return PerturbationDataset(
+            name=dataset_name,
+            h5_path=fpath,
+            mapping_strategy=self.mapping_strategy_cls(
+                random_state=self.random_seed,
+                n_basal_samples=self.n_basal_samples,
+                **mapping_kwargs,
+            ),
+            embed_key=self.embed_key,
+            pert_onehot_map=self.pert_onehot_map,
+            batch_onehot_map=self.batch_onehot_map,
+            cell_type_onehot_map=self.cell_type_onehot_map,
+            pert_col=self.pert_col,
+            cell_type_key=self.cell_type_key,
+            batch_col=self.batch_col,
+            control_pert=self.control_pert,
+            random_state=self.random_seed,
+            should_yield_control_cells=self.should_yield_control_cells,
+            store_raw_expression=self.store_raw_expression,
+            output_space=self.output_space,
+            store_raw_basal=self.store_raw_basal,
+            barcode=self.barcode,
+        )
 
-def data_to_torch_X(X):
-    """
-    Convert input data to a dense torch FloatTensor.
+    def _setup_datasets(self):
+        """
+        Set up training datasets with proper handling of zeroshot/fewshot splits w/ TOML.
+        Uses H5MetadataCache for faster metadata access.
+        """
 
-    If passed an AnnData, extracts its .X matrix.
-    If the result isn’t a NumPy array (e.g. a sparse matrix), calls .toarray().
-    Finally wraps with torch.from_numpy(...).float().
+        for dataset_name in self.config.get_all_datasets():
+            dataset_path = Path(self.config.datasets[dataset_name])
+            files = self._find_dataset_files(dataset_path)
 
-    Args:
-        X: anndata.AnnData or array-like (dense or sparse).
-    Returns:
-        torch.FloatTensor of shape (n_cells, n_features).
-    """
-    if isinstance(X, anndata.AnnData):
-        X = X.X
-    if not isinstance(X, np.ndarray):
-        X = X.toarray()
-    return torch.from_numpy(X).float()
+            # Get configuration for this dataset
+            zeroshot_celltypes = self.config.get_zeroshot_celltypes(
+                dataset_name)
+            fewshot_celltypes = self.config.get_fewshot_celltypes(dataset_name)
+            is_training_dataset = self.config.training.get(
+                dataset_name) == "train"
 
+            logger.info(f"Processing dataset {dataset_name}:")
+            logger.info(f"  - Training dataset: {is_training_dataset}")
+            logger.info(
+                f"  - Zeroshot cell types: {list(zeroshot_celltypes.keys())}")
+            logger.info(
+                f"  - Fewshot cell types: {list(fewshot_celltypes.keys())}")
 
-def split_perturbations_by_cell_fraction(
-    pert_groups: dict,
-    val_fraction: float,
-    rng: np.random.Generator = None,
-):
-    """
-    Partition the set of perturbations into two subsets: 'val' vs 'train',
-    such that the fraction of total cells in 'val' is as close as possible
-    to val_fraction, using a greedy approach.
+            # Process each file in the dataset
+            for fname, fpath in tqdm(list(files.items()),
+                                     desc=f"Processing {dataset_name}"):
+                # Create metadata cache
+                cache = GlobalH5MetadataCache().get_cache(
+                    str(fpath),
+                    self.pert_col,
+                    self.cell_type_key,
+                    self.control_pert,
+                    self.batch_col,
+                )
 
-    Here, pert_groups is a dictionary where the keys are perturbation names
-    and the values are numpy arrays of cell indices.
+                # Create base dataset
+                ds = self._create_base_dataset(dataset_name, fpath)
+                train_sum = val_sum = test_sum = 0
+                # Process each cell type in this file
+                for ct_idx, ct in enumerate(cache.cell_type_categories):
+                    # if dataset_name == "seurat":
+                    #     ct_mask = cache.cell_type_codes == ct.encode()  # ct_idx
+                    # else:
+                    #
+                    ct_mask = cache.cell_type_codes == ct_idx
+                    n_cells = np.sum(ct_mask)
 
-    Returns:
-        train_perts: list of perturbation names
-        val_perts:   list of perturbation names
-    """
-    if rng is None:
-        rng = np.random.default_rng(42)
+                    if n_cells == 0:
+                        continue
 
-    # 1) Compute total # of cells across all perturbations
-    total_cells = sum(len(indices) for indices in pert_groups.values())
-    target_val_cells = val_fraction * total_cells
+                    ct_indices = np.where(ct_mask)[0]
 
-    # 2) Create a list of (pert_name, size), then shuffle
-    pert_size_list = [(p, len(pert_groups[p])) for p in pert_groups.keys()]
-    rng.shuffle(pert_size_list)
+                    # Split into control and perturbed indices
+                    ctrl_mask = cache.pert_codes[
+                        ct_indices] == cache.control_pert_code
+                    ctrl_indices = ct_indices[ctrl_mask]
+                    pert_indices = ct_indices[~ctrl_mask]
 
-    # 3) Greedily add perts to the 'val' subset if it brings us closer to the target
-    val_perts = []
-    current_val_cells = 0
-    for pert, size in pert_size_list:
-        new_val_cells = current_val_cells + size
+                    # Determine how to handle this cell type
+                    counts = self._process_celltype(
+                        ds,
+                        ct,
+                        ct_indices,
+                        ctrl_indices,
+                        pert_indices,
+                        cache,
+                        dataset_name,
+                        zeroshot_celltypes,
+                        fewshot_celltypes,
+                        is_training_dataset,
+                    )
 
-        # Compare how close we'd be to target if we add this perturbation vs. skip it
-        diff_if_add = abs(new_val_cells - target_val_cells)
-        diff_if_skip = abs(current_val_cells - target_val_cells)
+                    train_sum += counts["train"]
+                    val_sum += counts["val"]
+                    test_sum += counts["test"]
 
-        if diff_if_add < diff_if_skip:
-            # Adding this perturbation gets us closer to the target fraction
-            val_perts.append(pert)
-            current_val_cells = new_val_cells
-        # else: skip it; it goes to train
+                tqdm.write(
+                    f"Processed {fname}: {train_sum} train, {val_sum} val, {test_sum} test"
+                )
 
-    train_perts = list(set(pert_groups.keys()) - set(val_perts))
+            logger.info("\n")
 
-    return train_perts, val_perts
+    def _split_fewshot_celltype(
+        self,
+        ds: PerturbationDataset,
+        pert_indices: np.ndarray,
+        ctrl_indices: np.ndarray,
+        cache,
+        pert_config: dict[str, list[str]],
+    ) -> dict[str, int]:
+        """Split a fewshot cell type according to perturbation assignments."""
+        counts = {"train": 0, "val": 0, "test": 0}
 
+        # Get perturbation codes for this cell type
+        pert_codes = cache.pert_codes[pert_indices]
 
-def suspected_discrete_torch(x: torch.Tensor, n_cells: int = 100) -> bool:
-    """Check if data appears to be discrete/raw counts by examining row sums.
-    Adapted from validate_normlog function for PyTorch tensors.
-    """
-    top_n = min(x.shape[0], n_cells)
-    rowsum = x[:top_n].sum(dim=1)
+        # Create sets of perturbation codes for each split
+        val_pert_names = set(pert_config.get("val", []))
+        test_pert_names = set(pert_config.get("test", []))
 
-    # Check if row sums are integers (fractional part == 0)
-    frac_part = rowsum - rowsum.floor()
-    return torch.all(torch.abs(frac_part) < 1e-7)
+        val_pert_codes = set()
+        test_pert_codes = set()
 
+        for i, pert_name in enumerate(cache.pert_categories):
+            if pert_name in val_pert_names:
+                val_pert_codes.add(i)
+            if pert_name in test_pert_names:
+                test_pert_codes.add(i)
 
-def suspected_log_torch(x: torch.Tensor) -> bool:
-    """Check if the data is log transformed already."""
-    global_max = x.max()
-    return global_max.item() < 15.0
+        # Split perturbation indices by their codes
+        val_mask = np.isin(pert_codes, list(val_pert_codes))
+        test_mask = np.isin(pert_codes, list(test_pert_codes))
+        train_mask = ~(val_mask | test_mask)
 
+        val_pert_indices = pert_indices[val_mask]
+        test_pert_indices = pert_indices[test_mask]
+        train_pert_indices = pert_indices[train_mask]
 
-def _mean(expr) -> float:
-    """Return the mean of a dense or sparse 1-D/2-D slice."""
-    if sp.issparse(expr):
-        return float(expr.mean())
-    return float(np.asarray(expr).mean())
+        # Split controls proportionally
+        rng = np.random.default_rng(self.random_seed)
+        ctrl_indices_shuffled = rng.permutation(ctrl_indices)
 
+        n_val = len(val_pert_indices)
+        n_test = len(test_pert_indices)
+        n_train = len(train_pert_indices)
+        total_pert = n_val + n_test + n_train
 
-def is_on_target_knockdown(
-    adata: anndata.AnnData,
-    target_gene: str,
-    perturbation_column: str = "gene",
-    control_label: str = "non-targeting",
-    residual_expression: float = 0.30,
-    layer: str | None = None,
-) -> bool:
-    """
-    True ⇢ average expression of *target_gene* in perturbed cells is below
-    `residual_expression` × (average expression in control cells).
+        if total_pert > 0:
+            n_ctrl_val = int(len(ctrl_indices) * n_val / total_pert)
+            n_ctrl_test = int(len(ctrl_indices) * n_test / total_pert)
 
-    Parameters
-    ----------
-    adata : AnnData
-    target_gene : str
-        Gene symbol to check.
-    perturbation_column : str, default "gene"
-        Column in ``adata.obs`` holding perturbation identities.
-    control_label : str, default "non-targeting"
-        Category in *perturbation_column* marking control cells.
-    residual_expression : float, default 0.30
-        Residual fraction (0‒1). 0.30 → 70 % knock-down.
-    layer : str | None, optional
-        Use this matrix in ``adata.layers`` instead of ``adata.X``.
+            val_ctrl_indices = ctrl_indices_shuffled[:n_ctrl_val]
+            test_ctrl_indices = ctrl_indices_shuffled[n_ctrl_val:n_ctrl_val +
+                                                      n_ctrl_test]
+            train_ctrl_indices = ctrl_indices_shuffled[n_ctrl_val +
+                                                       n_ctrl_test:]
 
-    Raises
-    ------
-    KeyError
-        *target_gene* not present in ``adata.var_names``.
-    ValueError
-        No perturbed cells for *target_gene*, or control mean is zero.
+            # Create subsets
+            if len(val_pert_indices) > 0:
+                subset = ds.to_subset_dataset("val", val_pert_indices,
+                                              val_ctrl_indices)
+                self.val_datasets.append(subset)
+                counts["val"] = len(subset)
 
-    Returns
-    -------
-    bool
-    """
-    if target_gene == control_label:
-        # Never evaluate the control itself
-        return False
+            if len(test_pert_indices) > 0:
+                subset = ds.to_subset_dataset("test", test_pert_indices,
+                                              test_ctrl_indices)
+                self.test_datasets.append(subset)
+                counts["test"] = len(subset)
 
-    if target_gene not in adata.var_names:
-        print(f"Gene {target_gene!r} not found in `adata.var_names`.")
-        return 1
+            if len(train_pert_indices) > 0:
+                subset = ds.to_subset_dataset("train", train_pert_indices,
+                                              train_ctrl_indices)
+                self.train_datasets.append(subset)
+                counts["train"] = len(subset)
 
-    gene_idx = adata.var_names.get_loc(target_gene)
-    X = adata.layers[layer] if layer is not None else adata.X
+        return counts
 
-    control_cells = adata.obs[perturbation_column] == control_label
-    perturbed_cells = adata.obs[perturbation_column] == target_gene
+    def _find_dataset_files(self, dataset_path: Path) -> dict[str, Path]:
+        files: Dict[str, Path] = {}
+        path_str = str(dataset_path)
 
-    if not perturbed_cells.any():
-        raise ValueError(
-            f"No cells labelled with perturbation {target_gene!r}.")
+        # Check if path contains glob patterns
+        if any(char in path_str for char in "*?[]{}"):
+            # Handle brace expansion manually since Python glob doesn't support it
+            expanded_patterns = self._expand_braces(path_str)
 
-    try:
-        control_mean = _mean(X[control_cells, gene_idx])
-    except:
-        control_cells = (
-            adata.obs[perturbation_column] == control_label).values
-        control_mean = _mean(X[control_cells, gene_idx])
-
-    if control_mean == 0:
-        raise ValueError(
-            f"Mean {target_gene!r} expression in control cells is zero; "
-            "cannot compute knock-down ratio.")
-
-    try:
-        perturbed_mean = _mean(X[perturbed_cells, gene_idx])
-    except:
-        perturbed_cells = (
-            adata.obs[perturbation_column] == target_gene).values
-        perturbed_mean = _mean(X[perturbed_cells, gene_idx])
-
-    knockdown_ratio = perturbed_mean / control_mean
-    return knockdown_ratio < residual_expression
-
-
-def filter_on_target_knockdown(
-    adata: anndata.AnnData,
-    perturbation_column: str = "gene",
-    control_label: str = "non-targeting",
-    residual_expression: float = 0.30,  # perturbation-level threshold
-    cell_residual_expression: float = 0.50,  # cell-level threshold
-    min_cells: int = 30,  # **NEW**: minimum cells/perturbation
-    layer: str | None = None,
-    var_gene_name: str = "gene_name",
-) -> anndata.AnnData:
-    """
-    1.  Keep perturbations whose *average* knock-down ≥ (1-residual_expression).
-    2.  Within those, keep only cells whose knock-down ≥ (1-cell_residual_expression).
-    3.  Discard perturbations that have < `min_cells` cells remaining
-        after steps 1–2.  Control cells are always preserved.
-
-    Returns
-    -------
-    AnnData
-        View of `adata` satisfying all three criteria.
-    """
-    # --- prep ---
-    adata_ = set_var_index_to_col(adata.copy(), col=var_gene_name)
-    X = adata_.layers[layer] if layer is not None else adata_.X
-    perts = adata_.obs[perturbation_column]
-    control_cells = (perts == control_label).values
-
-    # ---------- stage 1: perturbation filter ----------
-    perts_to_keep = [control_label]  # always keep controls
-    for pert in perts.unique():
-        if pert == control_label:
-            continue
-        if is_on_target_knockdown(
-                adata_,
-                target_gene=pert,
-                perturbation_column=perturbation_column,
-                control_label=control_label,
-                residual_expression=residual_expression,
-                layer=layer,
-        ):
-            perts_to_keep.append(pert)
-
-    # ---------- stage 2: cell filter ----------
-    keep_mask = np.zeros(adata_.n_obs, dtype=bool)
-    keep_mask[control_cells] = True  # retain all controls
-
-    # cache control means to avoid recomputation
-    control_mean_cache: dict[str, float] = {}
-
-    for pert in perts_to_keep:
-        if pert == control_label:
-            continue
-
-        if pert not in adata_.var_names:
-            continue
-
-        gene_idx = adata_.var_names.get_loc(pert)
-
-        # control mean for this gene
-        if pert not in control_mean_cache:
-            try:
-                ctrl_mean = _mean(X[control_cells, gene_idx])
-            except:
-                print(control_cells.shape, control_cells)
-                print(gene_idx)
-                print(X[control_cells, gene_idx].shape)
-            if ctrl_mean == 0:
-                raise ValueError(
-                    f"Mean {pert!r} expression in control cells is zero; "
-                    "cannot compute knock-down ratio.")
-            control_mean_cache[pert] = ctrl_mean
+            for pattern in expanded_patterns:
+                if pattern.startswith("/"):
+                    # Absolute path - use glob.glob()
+                    if pattern.endswith((".h5", ".h5ad")):
+                        # Pattern already specifies file extension
+                        for fpath_str in sorted(glob.glob(pattern)):
+                            fpath = Path(fpath_str)
+                            files[fpath.stem] = fpath
+                    else:
+                        # Pattern doesn't specify extension, add file patterns
+                        for ext in ("*.h5", "*.h5ad"):
+                            full_pattern = f"{pattern.rstrip('/')}/{ext}"
+                            for fpath_str in sorted(glob.glob(full_pattern)):
+                                fpath = Path(fpath_str)
+                                files[fpath.stem] = fpath
+                else:
+                    # Relative path - use Path.glob()
+                    if pattern.endswith((".h5", ".h5ad")):
+                        for fpath in sorted(Path().glob(pattern)):
+                            files[fpath.stem] = fpath
+                    else:
+                        for ext in ("*.h5", "*.h5ad"):
+                            full_pattern = f"{pattern.rstrip('/')}/{ext}"
+                            for fpath in sorted(Path().glob(full_pattern)):
+                                files[fpath.stem] = fpath
         else:
-            ctrl_mean = control_mean_cache[pert]
+            # No glob patterns - treat as regular path
+            if dataset_path.is_file():
+                # Single file
+                files[dataset_path.stem] = dataset_path
+            else:
+                # Directory - search for files
+                for ext in ("*.h5", "*.h5ad"):
+                    for fpath in sorted(dataset_path.glob(ext)):
+                        files[fpath.stem] = fpath
 
-        pert_cells = (perts == pert).values
-        # FIX: Replace .A1 with .toarray().flatten() for scipy sparse matrices
-        expr_vals = (X[pert_cells, gene_idx].toarray().flatten()
-                     if sp.issparse(X) else X[pert_cells, gene_idx])
-        ratios = expr_vals / ctrl_mean
-        keep_mask[pert_cells] = ratios < cell_residual_expression
+        return files
 
-    # ---------- stage 3: minimum-cell filter ----------
-    for pert in perts.unique():
-        if pert == control_label:
-            continue
-        # cells of this perturbation *still* kept after stages 1-2
-        pert_mask = (perts == pert).values & keep_mask
-        if pert_mask.sum() < min_cells:
-            keep_mask[pert_mask] = False  # drop them
+    def _expand_braces(self, pattern: str) -> list[str]:
+        """Expand brace patterns like {a,b,c} into multiple patterns."""
 
-    # return view with all criteria satisfied
-    return adata_[keep_mask]
+        def expand_single_brace(text: str) -> list[str]:
+            # Find the first brace group
+            match = re.search(r"\{([^}]+)\}", text)
+            if not match:
+                return [text]
 
+            # Extract the options and expand them
+            before = text[:match.start()]
+            after = text[match.end():]
+            options = match.group(1).split(",")
 
-def set_var_index_to_col(adata: anndata.AnnData,
-                         col: str = "col",
-                         copy=True) -> None:
-    """
-    Set `adata.var` index to the values in the specified column, allowing non-unique indices.
+            results = []
+            for option in options:
+                new_text = before + option.strip() + after
+                # Recursively expand any remaining braces
+                results.extend(expand_single_brace(new_text))
 
-    Parameters
-    ----------
-    adata : AnnData
-        The AnnData object to modify.
-    col : str
-        Column in `adata.var` to use as the new index.
+            return results
 
-    Raises
-    ------
-    KeyError
-        If the specified column does not exist in `adata.var`.
-    """
-    if col not in adata.var.columns:
-        raise KeyError(f"Column {col!r} not found in adata.var.")
+        return expand_single_brace(pattern)
 
-    adata.var.index = adata.var[col].astype("str")
-    adata.var_names_make_unique()
-    return adata
+    def _process_celltype(
+        self,
+        ds: PerturbationDataset,
+        celltype: str,
+        ct_indices: np.ndarray,
+        ctrl_indices: np.ndarray,
+        pert_indices: np.ndarray,
+        cache,
+        dataset_name: str,
+        zeroshot_celltypes: dict[str, str],
+        fewshot_celltypes: dict[str, dict[str, list[str]]],
+        is_training_dataset: bool,
+    ) -> dict[str, int]:
+        """Process a single cell type and return counts for each split."""
+        counts = {"train": 0, "val": 0, "test": 0}
+        if celltype in zeroshot_celltypes:
+            # Zeroshot: all cells go to specified split
+            split = zeroshot_celltypes[celltype]
+            subset = ds.to_subset_dataset(split, pert_indices, ctrl_indices)
+
+            if split == "train":
+                self.train_datasets.append(subset)
+            elif split == "val":
+                self.val_datasets.append(subset)
+            elif split == "test":
+                self.test_datasets.append(subset)
+
+            counts[split] = len(subset)
+
+        elif celltype in fewshot_celltypes:
+            # Fewshot: split perturbations according to config
+            pert_config = fewshot_celltypes[celltype]
+            split_counts = self._split_fewshot_celltype(
+                ds, pert_indices, ctrl_indices, cache, pert_config)
+            for split, count in split_counts.items():
+                counts[split] += count
+
+        elif is_training_dataset:
+            # Regular training cell type
+            subset = ds.to_subset_dataset("train",
+                                          pert_indices.astype(np.int32),
+                                          ctrl_indices.astype(np.int32))
+            self.train_datasets.append(subset)
+            counts["train"] = len(subset)
+
+        return counts
