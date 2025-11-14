@@ -112,27 +112,13 @@ class H5MetadataCache:
                     self.pert_codes = codes.astype(np.int32)
 
                 # ---- Cell type / cell line ----
-                # If you have a proper cell_type_key in obs, use it; otherwise fall back to one dummy type.
-                if cell_type_key in obs:
-                    ct_ds = obs[cell_type_key]
-                    if "categories" in ct_ds:
-                        self.cell_type_categories = safe_decode_array(
-                            ct_ds["categories"][:])
-                        self.cell_type_codes = ct_ds["codes"][:].astype(
-                            np.int32)
-                    else:
-                        raw = ct_ds[:]
-                        cats, codes = np.unique(raw, return_inverse=True)
-                        self.cell_type_categories = safe_decode_array(cats)
-                        self.cell_type_codes = codes.astype(np.int32)
-                else:
-                    n_cells = obs["PCR_plate"].shape[0]
-                    self.cell_type_categories = np.array(["A172"],
-                                                         dtype=object)
-                    self.cell_type_codes = np.zeros(n_cells, dtype=np.int32)
+                self.cell_type_codes = obs["PCR_plate"]["codes"][:].astype(
+                    np.int32)
+                self.cell_type_categories, self.cell_type_codes = np.unique(
+                    obs[cell_type_key][:], return_inverse=True)
 
-                # ---- Batch: sample or PCR_plate ----
-                batch_ds = obs["PCR_plate"]
+                # ---- Batch: sample ----
+                batch_ds = obs["sample"]
                 if "categories" in batch_ds:
                     self.batch_is_categorical = True
                     self.batch_categories = safe_decode_array(
