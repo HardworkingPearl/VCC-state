@@ -6,7 +6,7 @@ replogle_h1 = "/content/drive/MyDrive/VCC/datasets/h5/competition_support_set/{c
 # replogle_h1 = "./competition_support_set/{hepg2}.h5"
 # seurat      = "/content/drive/MyDrive/VCC/datasets/h5/jiang/Seurat_object_{TGFB,TNFA}_Perturb_seq.h5ad"
 # pbmcs       = "/content/drive/MyDrive/VCC/datasets/h5/pbmcs/adata_for_cellflow_datasets_with_embeddings.h5ad"
-mcfaline    = "/content/drive/MyDrive/VCC/datasets/h5/mcfaline/{GSM7056148_sciPlexGxE_1_preprocessed_cds,GSM7056149_sciPlexGxE_2_preprocessed_cds.list_A172,GSM7056149_sciPlexGxE_2_preprocessed_cds.list_T98G,GSM7056149_sciPlexGxE_2_preprocessed_cds.list_U87MG,GSM7056150_sciPlex_3_preprocessed_cds.list_GBM8,GSM7056150_sciPlex_3_preprocessed_cds.list_GSC0131,GSM7056150_sciPlex_3_preprocessed_cds.list_GSC0827,GSM7056151_sciPlex_4_preprocessed_cds.list_A172,GSM7056151_sciPlex_4_preprocessed_cds.list_T98G,GSM7056151_sciPlex_4_preprocessed_cds.list_U87MG}.h5ad"
+mcfaline    = "/content/drive/MyDrive/VCC/datasets/h5/mcfaline/{GSM7056148_sciPlexGxE_1_preprocessed_cds,GSM7056149_sciPlexGxE_2_preprocessed_cds.list_A172,GSM7056149_sciPlexGxE_2_preprocessed_cds.list_T98G,GSM7056149_sciPlexGxE_2_preprocessed_cds.list_U87MG}.h5ad"
 # srivatsam   = "/content/drive/MyDrive/VCC/datasets/h5/srivatsam/{sciPlex1_cds,sciPlex2_cds,sciPlex3_A549_24hrs,sciPlex3_cds_all_cells,sciPlex3_K562_24hrs,sciPlex3_MCF7_24hrs,sciPlex4_hdaci_cds}.h5ad"
 
 # Training specifications

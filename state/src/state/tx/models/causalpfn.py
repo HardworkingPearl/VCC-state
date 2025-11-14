@@ -282,52 +282,52 @@ class CausalPFNModel(PerturbationModel):
                 # latent_dim=self.output_dim + (self.batch_dim or 0),
             )
 
-        # Meta-data embedding via pretrained BERT
-        self.use_meta_bert = bool(kwargs.get("use_meta_bert", False))
-        self.meta_bert_model = kwargs.get("meta_bert_model",
-                                          "bert-base-uncased")
-        self.meta_bert_max_len = int(kwargs.get("meta_bert_max_len", 64))
-        self.meta_fusion = kwargs.get("meta_fusion", "add")  # "add" or "cat"
-        if self.use_meta_bert:
-            from transformers import BertTokenizer, BertModel
-            self._meta_tokenizer = BertTokenizer.from_pretrained(
-                self.meta_bert_model)
-            self._meta_bert = BertModel.from_pretrained(self.meta_bert_model)
-            for p in self._meta_bert.parameters():
-                p.requires_grad = False
-            self._meta_dim = self._meta_bert.config.hidden_size
-            if self.meta_fusion == "cat":
-                self._meta_proj = torch.nn.Linear(self._meta_dim,
-                                                  self.hidden_dim)
-                # If concatenating, ensure downstream dims match:
-                self._post_fusion_proj = torch.nn.Linear(
-                    self.hidden_dim + self.hidden_dim, self.hidden_dim)
-            else:
-                self._meta_proj = torch.nn.Linear(self._meta_dim,
-                                                  self.hidden_dim)
+        # # Meta-data embedding via pretrained BERT
+        # self.use_meta_bert = bool(kwargs.get("use_meta_bert", False))
+        # self.meta_bert_model = kwargs.get("meta_bert_model",
+        #                                   "bert-base-uncased")
+        # self.meta_bert_max_len = int(kwargs.get("meta_bert_max_len", 64))
+        # self.meta_fusion = kwargs.get("meta_fusion", "add")  # "add" or "cat"
+        # if self.use_meta_bert:
+        #     from transformers import BertTokenizer, BertModel
+        #     self._meta_tokenizer = BertTokenizer.from_pretrained(
+        #         self.meta_bert_model)
+        #     self._meta_bert = BertModel.from_pretrained(self.meta_bert_model)
+        #     for p in self._meta_bert.parameters():
+        #         p.requires_grad = False
+        #     self._meta_dim = self._meta_bert.config.hidden_size
+        #     if self.meta_fusion == "cat":
+        #         self._meta_proj = torch.nn.Linear(self._meta_dim,
+        #                                           self.hidden_dim)
+        #         # If concatenating, ensure downstream dims match:
+        #         self._post_fusion_proj = torch.nn.Linear(
+        #             self.hidden_dim + self.hidden_dim, self.hidden_dim)
+        #     else:
+        #         self._meta_proj = torch.nn.Linear(self._meta_dim,
+        #                                           self.hidden_dim)
         print(self)
 
-    def _encode_meta_text(self, texts: list):
-        """
-        texts: list of length B*S (same order as flattened cells).
-        Returns tensor [B*S, hidden_dim] on correct device.
-        """
-        if not self.use_meta_bert or not texts:
-            return None
-        tokens = self._meta_tokenizer(
-            texts,
-            add_special_tokens=False,
-            padding=True,
-            truncation=True,
-            max_length=self.meta_bert_max_len,
-            return_tensors="pt",
-        )
-        tokens = {k: v.to(self.device) for k, v in tokens.items()}
-        with torch.no_grad():
-            last = self._meta_bert(**tokens).last_hidden_state  # [N,L,H]
-        pooled = last.mean(dim=1)  # [N,H]
-        emb = self._meta_proj(pooled)  # [N,hidden_dim]
-        return emb
+    # def _encode_meta_text(self, texts: list):
+    #     """
+    #     texts: list of length B*S (same order as flattened cells).
+    #     Returns tensor [B*S, hidden_dim] on correct device.
+    #     """
+    #     if not self.use_meta_bert or not texts:
+    #         return None
+    #     tokens = self._meta_tokenizer(
+    #         texts,
+    #         add_special_tokens=False,
+    #         padding=True,
+    #         truncation=True,
+    #         max_length=self.meta_bert_max_len,
+    #         return_tensors="pt",
+    #     )
+    #     tokens = {k: v.to(self.device) for k, v in tokens.items()}
+    #     with torch.no_grad():
+    #         last = self._meta_bert(**tokens).last_hidden_state  # [N,L,H]
+    #     pooled = last.mean(dim=1)  # [N,H]
+    #     emb = self._meta_proj(pooled)  # [N,hidden_dim]
+    #     return emb
 
     def _build_networks(self, lora_cfg=None):
         """
