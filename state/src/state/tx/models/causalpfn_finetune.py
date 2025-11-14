@@ -5,6 +5,7 @@ import anndata as ad
 import numpy as np
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 from geomloss import SamplesLoss
 from typing import Tuple
@@ -262,7 +263,29 @@ class CausalPFNModel(PerturbationModel):
                 # latent_dim=self.output_dim + (self.batch_dim or 0),
             )
         print(self)
+        
+    def _encode_meta_text(self, texts: list):
+        """
+        texts: list of length B*S (same order as flattened cells).
+        Returns tensor [B*S, hidden_dim] on correct device.
+        """
+        if not self.use_meta_bert:
+            return None
+        tokens = self._meta_tokenizer(
+            texts,
+            add_special_tokens=False,
+            padding=True,
+            truncation=True,
+            max_length=self.meta_bert_max_len,
+            return_tensors="pt",
+        )
+        tokens = {k: v.to(self.device) for k, v in tokens.items()}
+        with torch.no_grad():
+            last = self._meta_bert(**tokens).last_hidden_state  # [N,L,H]
+        pooled = last.mean(dim=1)  # [N,H]
 
+        return pooled
+        
     def _build_networks(self, lora_cfg=None):
         """
         Here we instantiate the actual GPT2-based model.
@@ -272,10 +295,37 @@ class CausalPFNModel(PerturbationModel):
         self.tabpfn_context_X = nn.Parameter(torch.randn(2048, 512)).to('cuda')  # 18080 + 5120
         self.tabpfn_context_Y = nn.Parameter(torch.randn(2048, 512)).to('cuda')  # 512
         # self.tabpfn_mdl = TabPFNRegressor(device='cuda',ignore_pretraining_limits=True)
-        loaded = np.load("train_data.npz") # np.load("train_data_esm_evo.npz")  #
+        loaded = np.load("train_data_meta.npz") # np.load("train_data.npz") # np.load("train_data_esm_evo.npz")  #
         self.datasets = loaded["X_train"]  #  raw dataset input as context 
         self.targets = loaded["y_train"]   #  
+        self.meta_datas = loaded["m_train"]  #  raw dataset input as context 
         self.treatments = torch.from_numpy(loaded["t_train"]).to('cuda')
+
+
+        # Meta-data embedding via pretrained BERT
+        self.use_meta_bert = True #bool(kwargs.get("use_meta_bert", False))
+        self.meta_bert_model = "bert-base-uncased" #kwargs.get("meta_bert_model",
+                                          # "bert-base-uncased")
+        self.meta_bert_max_len = 64 #int(kwargs.get("meta_bert_max_len", 64))
+        self.meta_fusion = "add" #kwargs.get("meta_fusion", "add")  # "add" or "cat"
+        if self.use_meta_bert:
+            from transformers import BertTokenizer, BertModel
+            self._meta_tokenizer = BertTokenizer.from_pretrained(
+                self.meta_bert_model)
+            self._meta_bert = BertModel.from_pretrained(self.meta_bert_model)
+            for p in self._meta_bert.parameters():
+                p.requires_grad = False
+            self._meta_dim = self._meta_bert.config.hidden_size
+            if self.meta_fusion == "cat":
+                self._meta_proj = torch.nn.Linear(self._meta_dim,
+                                                  self.hidden_dim)
+                # If concatenating, ensure downstream dims match:
+                self._post_fusion_proj = torch.nn.Linear(
+                    self.hidden_dim + self.hidden_dim, self.hidden_dim)
+            else:
+                self._meta_proj = torch.nn.Linear(self._meta_dim,
+                                                  self.hidden_dim)
+
         causalpfn_cate = CATEEstimator(
             device='cuda',
             verbose=True,
@@ -304,6 +354,15 @@ class CausalPFNModel(PerturbationModel):
 
         self.pert_encoder = build_mlp(
             in_dim=self.pert_dim, # 7040, # 
+            out_dim=self.hidden_dim,
+            hidden_dim=self.hidden_dim,
+            n_layers=self.n_encoder_layers,
+            dropout=self.dropout,
+            activation=self.activation_class,
+        )
+
+        self.meta_data_encoder = build_mlp(
+            in_dim=768, # 7040, # 
             out_dim=self.hidden_dim,
             hidden_dim=self.hidden_dim,
             n_layers=self.n_encoder_layers,
@@ -378,6 +437,39 @@ class CausalPFNModel(PerturbationModel):
         The `padded` argument here is set to True if the batch is padded. Otherwise, we
         expect a single batch, so that sentences can vary in length across batches.
         """
+        # Handle None, crop, or pad to size 5120
+        for i, emb in enumerate(batch["pert_emb"]):
+            if emb is None:
+                batch["pert_emb"][i] = torch.zeros(5120, dtype=torch.float32)
+            elif emb.size(0) < 5120:
+                batch["pert_emb"][i] = F.pad(emb, (0, 5120 - emb.size(0)))
+        batch["pert_emb"] = torch.cat(batch["pert_emb"], dim=0).float().to('cuda')
+        # target_size = 5120
+        # if pert_onehot is None:
+        #     pert_onehot = torch.zeros(target_size, dtype=torch.float32)
+        # else:
+        #     # Preserve dtype and device
+        #     dtype = pert_onehot.dtype
+        #     device = pert_onehot.device
+            
+        #     # Get the actual size (handle both 1D and multi-dimensional tensors)
+        #     if pert_onehot.dim() == 0:
+        #         # Scalar tensor - reshape to 1D
+        #         pert_onehot = pert_onehot.unsqueeze(0)
+            
+        #     # Flatten to 1D for size checking
+        #     flat_size = pert_onehot.numel()
+        #     if flat_size > target_size:
+        #         # Crop: take first target_size elements
+        #         pert_onehot = pert_onehot.flatten()[:target_size]
+        #     elif flat_size < target_size:
+        #         # Pad: append zeros to reach target_size
+        #         padding_size = target_size - flat_size
+        #         padding = torch.zeros(padding_size, dtype=dtype, device=device)
+        #         pert_onehot = torch.cat([pert_onehot.flatten(), padding])
+        #     else:
+        #         # Already correct size, just flatten if needed
+        #         pert_onehot = pert_onehot.flatten()
         if padded:
             pert = batch["pert_emb"].reshape(-1, self.cell_sentence_len, self.pert_dim)
             basal = batch["ctrl_cell_emb"].reshape(-1, self.cell_sentence_len, self.input_dim)
@@ -386,11 +478,53 @@ class CausalPFNModel(PerturbationModel):
             pert = batch["pert_emb"].reshape(1, -1, self.pert_dim)
             basal = batch["ctrl_cell_emb"].reshape(1, -1, self.input_dim)
         
+        def format_value(val):
+            """Convert value to string, handling various types."""
+            if isinstance(val, torch.Tensor):
+                val = val.cpu().numpy()
+            if isinstance(val, np.ndarray):
+                if val.ndim == 0:
+                    val = val.item()
+                elif val.size == 1:
+                    val = val.item()
+                else:
+                    # For arrays, join elements
+                    val = ' '.join(str(v) for v in val.flatten()[:10])  # Limit to first 10 elements
+            if isinstance(val, (list, tuple)):
+                val = ' '.join(str(v) for v in val[:10])  # Limit to first 10 elements
+            return str(val)
+        
+        # Get batch size from one of the batch entries
+        batch_size = len(batch['pert_name']) if 'pert_name' in batch else len(batch.get('cell_type', []))
+        
+        # Create a list of sentences, one for each item in the batch
+        cell_sentence = []
+        for i in range(batch_size):
+            sentence_parts = []
+            if 'cell_type' in batch:
+                cell_type_val = batch['cell_type'][i] if isinstance(batch['cell_type'], (list, tuple, np.ndarray, torch.Tensor)) else batch['cell_type']
+                sentence_parts.append(f"'cell_type': {format_value(cell_type_val)}")
+            if 'batch_name' in batch:
+                batch_name_val = batch['batch_name'][i] if isinstance(batch['batch_name'], (list, tuple, np.ndarray, torch.Tensor)) else batch['batch_name']
+                sentence_parts.append(f"'batch_name': {format_value(batch_name_val)}")
+            if 'ctrl_cell_barcode' in batch:
+                ctrl_barcode_val = batch['ctrl_cell_barcode'][i] if isinstance(batch['ctrl_cell_barcode'], (list, tuple, np.ndarray, torch.Tensor)) else batch['ctrl_cell_barcode']
+                sentence_parts.append(f"'ctrl_cell_barcode': {format_value(ctrl_barcode_val)}")
+            if 'pert_cell_barcode' in batch:
+                pert_barcode_val = batch['pert_cell_barcode'][i] if isinstance(batch['pert_cell_barcode'], (list, tuple, np.ndarray, torch.Tensor)) else batch['pert_cell_barcode']
+                sentence_parts.append(f"'pert_cell_barcode': {format_value(pert_barcode_val)}")
+            
+            cell_sentence.append(', '.join(sentence_parts))
+        meta_emb = self._encode_meta_text(cell_sentence)
+        meta_emb = self.meta_data_encoder(meta_emb)
+
+
         # Shape: [B, S, input_dim]
         pert_embedding = self.encode_perturbation(pert)  # 5120 -> 672
         control_cells = self.encode_basal_expression(basal)  # 18080 -> 672
         # Add encodings in input_dim space, then project to hidden_dim
-        combined_input = pert_embedding + control_cells  # Shape: [B, S, hidden_dim]
+
+        combined_input = pert_embedding + control_cells + meta_emb.view(-1, self.cell_sentence_len, self.hidden_dim) # Shape: [B, S, hidden_dim]
         # combined_input = torch.cat((batch["pert_emb"],batch["ctrl_cell_emb"]), 1)
         seq_input = combined_input  # Shape: [B, S, hidden_dim] 672
         
@@ -401,23 +535,26 @@ class CausalPFNModel(PerturbationModel):
             num_samples = self.targets.shape[0]
             pert_context = []
             control_cells_context = []
-
+            meta_emb_context = []
             for start in range(0, num_samples, batch_size):
                 end = min(start + batch_size, num_samples)
                 pert_batch = self.encode_perturbation(torch.from_numpy(self.datasets[start:end, self.input_dim:]).to('cuda'))                 
                 control_cells_batch = self.encode_basal_expression(torch.from_numpy(self.datasets[start:end, :self.input_dim]).to('cuda')) 
                 pert_context.append(pert_batch)
-                control_cells_context.append(control_cells_batch)
+                meta_emb_batch = self.meta_data_encoder(torch.from_numpy(self.meta_datas[start:end]).to('cuda'))
 
+                control_cells_context.append(control_cells_batch)
+                meta_emb_context.append(meta_emb_batch)
+            meta_emb_context = torch.cat(meta_emb_context, dim=0)
             pert_context = torch.cat(pert_context, dim=0)
             control_cells_context = torch.cat(control_cells_context, dim=0)
-            combined_input_context = pert_context + control_cells_context
+            combined_input_context = pert_context + control_cells_context + meta_emb_context
             self.causalpfn_mdl.X_train = combined_input_context.detach()
             self.causalpfn_mdl.t_train = self.treatments
             self.causalpfn_mdl.y_train = self.targets
         if self.training: 
             self.step+=1
-            if self.step == 213:
+            if self.step == 500:
                 self.step = 0
 
         treatment = torch.tensor([int(t != 'non-targeting') for t in batch['pert_name']]).to('cuda')

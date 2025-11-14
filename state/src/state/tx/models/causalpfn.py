@@ -265,6 +265,28 @@ class CausalPFNModel(PerturbationModel):
             )
         print(self)
 
+    def _encode_meta_text(self, texts: list):
+        """
+        texts: list of length B*S (same order as flattened cells).
+        Returns tensor [B*S, hidden_dim] on correct device.
+        """
+        if not self.use_meta_bert or not texts:
+            return None
+        tokens = self._meta_tokenizer(
+            texts,
+            add_special_tokens=False,
+            padding=True,
+            truncation=True,
+            max_length=self.meta_bert_max_len,
+            return_tensors="pt",
+        )
+        tokens = {k: v.to(self.device) for k, v in tokens.items()}
+        with torch.no_grad():
+            last = self._meta_bert(**tokens).last_hidden_state  # [N,L,H]
+        pooled = last.mean(dim=1)  # [N,H]
+
+        return pooled
+
     def _build_networks(self, lora_cfg=None):
         """
         Here we instantiate the actual GPT2-based model.
@@ -274,8 +296,29 @@ class CausalPFNModel(PerturbationModel):
         self.datasets = []
         self.targets = []
         self.treatments = []
-        self.tabpfn_context_X = nn.Parameter(torch.randn(2048, 512)).to('cuda')  # 18080 + 5120
-        self.tabpfn_context_Y = nn.Parameter(torch.randn(2048, 512)).to('cuda')  # 512
+        # Meta-data embedding via pretrained BERT
+        self.use_meta_bert = True #bool(kwargs.get("use_meta_bert", False))
+        self.meta_bert_model = "bert-base-uncased" #kwargs.get("meta_bert_model",
+                                          # "bert-base-uncased")
+        self.meta_bert_max_len = 64 #int(kwargs.get("meta_bert_max_len", 64))
+        self.meta_fusion = "add" #kwargs.get("meta_fusion", "add")  # "add" or "cat"
+        if self.use_meta_bert:
+            from transformers import BertTokenizer, BertModel
+            self._meta_tokenizer = BertTokenizer.from_pretrained(
+                self.meta_bert_model)
+            self._meta_bert = BertModel.from_pretrained(self.meta_bert_model)
+            for p in self._meta_bert.parameters():
+                p.requires_grad = False
+            self._meta_dim = self._meta_bert.config.hidden_size
+            if self.meta_fusion == "cat":
+                self._meta_proj = torch.nn.Linear(self._meta_dim,
+                                                  self.hidden_dim)
+                # If concatenating, ensure downstream dims match:
+                self._post_fusion_proj = torch.nn.Linear(
+                    self.hidden_dim + self.hidden_dim, self.hidden_dim)
+            else:
+                self._meta_proj = torch.nn.Linear(self._meta_dim,
+                                                  self.hidden_dim)
         # self.tabpfn_mdl = TabPFNRegressor(device='cuda',ignore_pretraining_limits=True)
         causalpfn_cate = CATEEstimator(
             device='cuda',
@@ -379,7 +422,10 @@ class CausalPFNModel(PerturbationModel):
         #     # we are inferencing on a single batch, so accept variable length sentences
         #     pert = batch["pert_emb"].reshape(1, -1, self.pert_dim)
         #     basal = batch["ctrl_cell_emb"].reshape(1, -1, self.input_dim)
+        breakpoint()   
         treatment = torch.tensor([int(t != 'non-targeting') for t in batch['pert_name']])
+        meta_text = batch["cell_sentence"]  
+        meta_emb = self._encode_meta_text(meta_text)
         if self.training:
             self.step += 1
             if len(batch["pert_emb"]) * (len(self.datasets)) < 10000:
@@ -394,6 +440,8 @@ class CausalPFNModel(PerturbationModel):
         combined_input = torch.cat((batch["pert_emb"],batch["ctrl_cell_emb"]), 1)
         # combined_input = pert_embedding + control_cells  # Shape: [B, S, hidden_dim]. # QH: later try concate
         seq_input = combined_input  # Shape: [B, S, hidden_dim] 672
+
+
 
         if self.batch_encoder is not None:
             # Extract batch indices (assume they are integers or convert from one-hot)

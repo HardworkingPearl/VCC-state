@@ -140,6 +140,7 @@ module load cuda/12.6
 module load cudnn
 echo $EBROOTCUDNN
 ls $EBROOTCUDNN/lib
+# A must
 export LD_LIBRARY_PATH=/cvmfs/soft.computecanada.ca/easybuild/software/2023/x86-64-v3/CUDA/cuda12.6/cudnn/9.10.0.56/lib:$LD_LIBRARY_PATH
 pip install '/home/absking/scratch/transformer_engine_cu12-2.3.0-py3-none-linux_x86_64.whl'
 
@@ -266,4 +267,8 @@ Cells: total=98927, control=38176, non-control=60751
 
 For evo2: module load python/3.12
 
-python -m src.state tx train data.kwargs.toml_config_path="competition_support_set/starter.toml"   data.kwargs.num_workers=4   data.kwargs.batch_col="batch_var"   data.kwargs.pert_col="target_gene"   data.kwargs.cell_type_key="cell_type"   data.kwargs.control_pert="non-targeting"   data.kwargs.perturbation_features_file="competition_support_set/merged_gene_embeddings.pt"   training.max_steps=32000   training.ckpt_every_n_steps=213 training.val_freq=213 model=causalpfn   wandb.tags="causalpfn"   output_dir="competition"   name="causalpfn"
+python -m src.state tx train data.kwargs.toml_config_path="competition_support_set/starter.toml"   data.kwargs.num_workers=4   data.kwargs.batch_col="batch_var"   data.kwargs.pert_col="target_gene"   data.kwargs.cell_type_key="cell_type"   data.kwargs.control_pert="non-targeting"   data.kwargs.perturbation_features_file="competition_support_set/ESM2_pert_features.pt"   training.max_steps=32000   training.ckpt_every_n_steps=213 training.val_freq=213 model=causalpfn   wandb.tags="causalpfn"   output_dir="competition"   name="causalpfn"
+
+python -m src.state tx train data.kwargs.toml_config_path="competition_support_set/starter.toml"   data.kwargs.num_workers=4   data.kwargs.batch_col="batch_var"   data.kwargs.pert_col="target_gene"   data.kwargs.cell_type_key="cell_type"   data.kwargs.control_pert="non-targeting"   data.kwargs.perturbation_features_file="competition_support_set/ESM2_pert_features.pt"   training.max_steps=60000   training.ckpt_every_n_steps=1000 training.val_freq=1000 model=causalpfn   wandb.tags="causalpfn"   output_dir="competition_1"   name="causalpfn_seurat_pbmcs"
+
+python -m src.state tx train data.kwargs.toml_config_path="competition_support_set/starter.toml"   data.kwargs.num_workers=4 data.kwargs.batch_col="batch_var"   data.kwargs.pert_col="target_gene"   data.kwargs.cell_type_key="cell_type"   data.kwargs.control_pert="non-targeting"   data.kwargs.perturbation_features_file="competition_support_set/ESM_pert_features_merged.pt"   training.max_steps=60000   training.ckpt_every_n_steps=1000 training.val_freq=1000 model=causalpfn   wandb.tags="causalpfn"   output_dir="competition_1"   name="causalpfn_seurat_pbmcs"

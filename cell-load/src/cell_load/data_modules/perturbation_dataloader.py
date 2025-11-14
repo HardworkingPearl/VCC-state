@@ -399,8 +399,21 @@ class PerturbationDataModule(LightningDataModule):
                 # breakpoint()
                 with h5py.File(fpath, "r") as f:
                     # TODO: SJQ + branch: 
-                    if dataset_name == "pbmcs":          
+                    if dataset_name == "pbmcs":  
+                        # breakpoint()        
                         batch_arr = f[f"obs/sample/categories"][:]
+                        pert_arr = f['uns/esm2_embeddings'].keys()
+                        perts = set(safe_decode_array(pert_arr))
+                        all_perts.update(perts)  # pert gene names
+                        # Convert HDF5 group to dictionary
+                        # h5_embeddings = f['uns/esm2_embeddings']
+                        # h5_dict = {key: torch.from_numpy(h5_embeddings[key][:]) for key in h5_embeddings.keys()}
+                        # # Load existing ESM2 dictionary
+                        # esm2_dict = torch.load("/home/absking/scratch/vcc/state/competition_support_set/ESM2_pert_features.pt", map_location='cpu')
+                        # # Merge dictionaries (h5_dict takes precedence)
+                        # merged_dict = {**esm2_dict, **h5_dict}
+                        # torch.save(merged_dict, "/home/absking/scratch/vcc/state/competition_support_set/ESM2_pert_features_merged.pt")
+
                         batches = set(safe_decode_array(batch_arr))
                         try:
                             celltype_arr = f[f"obs/{self.cell_type_key}/categories"][:]
