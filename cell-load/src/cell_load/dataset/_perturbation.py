@@ -1,7 +1,6 @@
 import logging
 from pathlib import Path
 
-from functools import lru_cache
 import h5py
 import numpy as np
 import torch
@@ -14,8 +13,26 @@ from ..utils.data_utils import (
     suspected_log_torch,
 )
 
-
 logger = logging.getLogger(__name__)
+### TODO: modify below absolute path for the entry
+with h5py.File(
+        "/home/absking/scratch/vcc/state/competition_support_set/hepg2.h5",
+        "r") as f:
+    gene_base_index = f['var/_index'][:]
+
+
+def align_vector_bytes(x, var_index, base_index):
+    """
+    Align a 1D vector x (len = len(var_index)) to the base_index.
+    Missing genes get filled with 0.
+    """
+    # intersection + index mapping
+    _, idx_base, idx_var = np.intersect1d(base_index,
+                                          var_index,
+                                          return_indices=True)
+    aligned = torch.zeros(base_index.shape[0])
+    aligned[idx_base] = x[idx_var]
+    return aligned
 
 
 class PerturbationDataset(Dataset):
@@ -83,15 +100,11 @@ class PerturbationDataset(Dataset):
         self.store_raw_basal = store_raw_basal
         self.barcode = barcode
         self.output_space = kwargs.get("output_space", "gene")
-        if self.output_space not in {"gene", "all", "embedding"}:
-            raise ValueError(
-                f"output_space must be one of 'gene', 'all', or 'embedding'; got {self.output_space!r}"
-            )
 
         # Load metadata cache and open file
         self.metadata_cache = GlobalH5MetadataCache().get_cache(
-            str(self.h5_path), pert_col, cell_type_key, control_pert, batch_col
-        )
+            str(self.h5_path), pert_col, cell_type_key, control_pert,
+            batch_col)
         self.h5_file = h5py.File(self.h5_path, "r")
 
         # Load cell barcodes if requested
@@ -139,8 +152,7 @@ class PerturbationDataset(Dataset):
                 pert_arr = np.array(sorted(pert_set))
                 ctrl_arr = np.array(sorted(ctrl_set))
                 self.mapping_strategy.register_split_indices(
-                    self, split, pert_arr, ctrl_arr
-                )
+                    self, split, pert_arr, ctrl_arr)
 
     def __getitem__(self, idx: int):
         """
@@ -157,38 +169,36 @@ class PerturbationDataset(Dataset):
         - pert_cell_counts: the raw gene expression of the perturbed cell (if store_raw_expression is True)
         - ctrl_cell_counts: the raw gene expression of the control cell (if store_raw_basal is True)
         """
-
         # Get the perturbed cell expression, control cell expression, and index of mapped control cell
         file_idx = int(self.all_indices[idx])
         split = self._find_split_for_idx(file_idx)
         pert_expr, ctrl_expr, ctrl_idx = self.mapping_strategy.get_mapped_expressions(
-            self, split, file_idx
-        )
-
+            self, split, file_idx)
+        # breakpoint()
+        # To load ESM2 embeddings, we need to load the embeddings from the h5 file
         # Perturbation info
         pert_code = self.metadata_cache.pert_codes[file_idx]
         pert_name = self.pert_categories[pert_code]
-        pert_onehot = (
-            self.pert_onehot_map.get(pert_name) if self.pert_onehot_map else None
-        )
-
+        pert_onehot = (self.pert_onehot_map.get(pert_name)
+                       if self.pert_onehot_map else None)
         # Cell type info
         cell_type = self.cell_type_categories[
-            self.metadata_cache.cell_type_codes[file_idx]
-        ]
-        cell_type_onehot = (
-            self.cell_type_onehot_map.get(cell_type)
-            if self.cell_type_onehot_map
-            else None
-        )
+            self.metadata_cache.cell_type_codes[file_idx]]
+        if isinstance(cell_type, bytes):
+            cell_type = cell_type.decode("utf-8")
+        cell_type_onehot = (self.cell_type_onehot_map.get(cell_type)
+                            if self.cell_type_onehot_map else None)
 
         # Batch info
         batch_code = self.metadata_cache.batch_codes[file_idx]
         batch_name = self.metadata_cache.batch_categories[batch_code]
-        batch_onehot = (
-            self.batch_onehot_map.get(batch_name) if self.batch_onehot_map else None
-        )
 
+        if isinstance(batch_name, bytes):
+            batch_name = batch_name.decode("utf-8")
+        batch_onehot = (self.batch_onehot_map.get(batch_name)
+                        if self.batch_onehot_map else None)
+        # if pert_name != "non-targeting":
+        #     breakpoint()
         sample = {
             "pert_cell_emb": pert_expr,
             "ctrl_cell_emb": ctrl_expr,
@@ -201,22 +211,22 @@ class PerturbationDataset(Dataset):
         }
 
         # Optionally include raw expressions for the perturbed cell, for training a decoder
-        if self.store_raw_expression and self.output_space != "embedding":
+        if self.store_raw_expression:
             if self.output_space == "gene":
                 sample["pert_cell_counts"] = self.fetch_obsm_expression(
-                    file_idx, "X_hvg"
-                )
+                    file_idx, "X_hvg")
             elif self.output_space == "all":
-                sample["pert_cell_counts"] = self.fetch_gene_expression(file_idx)
+                sample["pert_cell_counts"] = self.fetch_gene_expression(
+                    file_idx)
 
         # Optionally include raw expressions for the control cell
-        if self.store_raw_basal and self.output_space != "embedding":
+        if self.store_raw_basal:
             if self.output_space == "gene":
                 sample["ctrl_cell_counts"] = self.fetch_obsm_expression(
-                    ctrl_idx, "X_hvg"
-                )
+                    ctrl_idx, "X_hvg")
             elif self.output_space == "all":
-                sample["ctrl_cell_counts"] = self.fetch_gene_expression(ctrl_idx)
+                sample["ctrl_cell_counts"] = self.fetch_gene_expression(
+                    ctrl_idx)
 
         # Optionally include cell barcodes
         if self.barcode and self.cell_barcodes is not None:
@@ -230,9 +240,7 @@ class PerturbationDataset(Dataset):
         Get the batch information for a given cell index. Returns a scalar tensor.
         """
         assert self.batch_onehot_map is not None, "No batch onehot map, run setup."
-        # Translate row index -> batch code -> batch category name
-        batch_code = self.metadata_cache.batch_codes[idx]
-        batch_name = self.metadata_cache.batch_categories[batch_code]
+        batch_name = self.metadata_cache.batch_categories[idx]
         batch = torch.argmax(self.batch_onehot_map[batch_name])
         return batch.item()
 
@@ -246,8 +254,6 @@ class PerturbationDataset(Dataset):
         """
         Get the cell type for a given index.
         """
-        # Convert idx to int in case it's a tensor or array
-        idx = int(idx) if hasattr(idx, "__int__") else idx
         code = self.metadata_cache.cell_type_codes[idx]
         return self.metadata_cache.cell_type_categories[code]
 
@@ -262,8 +268,6 @@ class PerturbationDataset(Dataset):
         """
         Get the perturbation name for a given index.
         """
-        # Convert idx to int in case it's a tensor or array
-        idx = int(idx) if hasattr(idx, "__int__") else idx
         pert_code = self.metadata_cache.pert_codes[idx]
         return self.metadata_cache.pert_categories[pert_code]
 
@@ -297,9 +301,6 @@ class PerturbationDataset(Dataset):
         else:
             return Subset(self, perturbed_indices)
 
-    @lru_cache(
-        maxsize=10000
-    )  # cache the results of the function; lots of hits for batch mapping since most sentences have repeated cells
     def fetch_gene_expression(self, idx: int) -> torch.Tensor:
         """
         Fetch raw gene counts for a given cell index.
@@ -317,12 +318,11 @@ class PerturbationDataset(Dataset):
             indptr = self.h5_file["/X/indptr"]
             start_ptr = indptr[idx]
             end_ptr = indptr[idx + 1]
-            sub_data = torch.tensor(
-                self.h5_file["/X/data"][start_ptr:end_ptr], dtype=torch.float32
-            )
+            sub_data = torch.tensor(self.h5_file["/X/data"][start_ptr:end_ptr],
+                                    dtype=torch.float32)
             sub_indices = torch.tensor(
-                self.h5_file["/X/indices"][start_ptr:end_ptr], dtype=torch.long
-            )
+                self.h5_file["/X/indices"][start_ptr:end_ptr],
+                dtype=torch.long)
             counts = torch.sparse_csr_tensor(
                 torch.tensor([0], dtype=torch.long),
                 sub_indices,
@@ -333,9 +333,12 @@ class PerturbationDataset(Dataset):
         else:
             row_data = self.h5_file["/X"][idx]
             data = torch.tensor(row_data, dtype=torch.float32)
+        if len(data) != 18080:
+            # breakpoint()  # if not 18080 padding and intersection
+            data = align_vector_bytes(data, self.h5_file['var/_index'][:],
+                                      gene_base_index)
         return data
 
-    @lru_cache(maxsize=10000)
     def fetch_obsm_expression(self, idx: int, key: str) -> torch.Tensor:
         """
         Fetch a single row from the /obsm/{key} embedding matrix.
@@ -360,13 +363,12 @@ class PerturbationDataset(Dataset):
         """
 
         def _decode(x):
-            return x.decode("utf-8") if isinstance(x, (bytes, bytearray)) else str(x)
+            return x.decode("utf-8") if isinstance(x, (bytes,
+                                                       bytearray)) else str(x)
 
         try:
-            if (
-                "var/gene_name/codes" in self.h5_file
-                and "var/gene_name/categories" in self.h5_file
-            ):
+            if ("var/gene_name/codes" in self.h5_file
+                    and "var/gene_name/categories" in self.h5_file):
                 gene_codes = self.h5_file["var/gene_name/codes"][:]
                 gene_categories = self.h5_file["var/gene_name/categories"][:]
                 raw = gene_categories[gene_codes]
@@ -375,10 +377,8 @@ class PerturbationDataset(Dataset):
                     raw = self.h5_file["var/gene_name"][:]
                 except:
                     raw = self.h5_file["var/gene_name_index"][:]
-            if (
-                output_space == "gene"
-                and "highly_variable" in self.h5_file["/var"].keys()
-            ):
+            if (output_space == "gene"
+                    and "highly_variable" in self.h5_file["/var"].keys()):
                 hvg_mask = self.h5_file["/var/highly_variable"][:]
                 raw = raw[hvg_mask]
             elif output_space == "gene":
@@ -391,20 +391,16 @@ class PerturbationDataset(Dataset):
             try:
                 cats = self.h5_file["var/gene_name/categories"][:]
                 codes = self.h5_file["var/gene_name/codes"][:]
-                if (
-                    output_space == "gene"
-                    and "highly_variable" in self.h5_file["/var"].keys()
-                ):
+                if (output_space == "gene"
+                        and "highly_variable" in self.h5_file["/var"].keys()):
                     hvg_mask = self.h5_file["/var/highly_variable"][:]
                     codes = codes[hvg_mask]
                 decoded = [_decode(x) for x in cats]
                 return [decoded[i] for i in codes]
             except KeyError:
                 fallback = self.h5_file["var/_index"][:]
-                if (
-                    output_space == "gene"
-                    and "highly_variable" in self.h5_file["/var"].keys()
-                ):
+                if (output_space == "gene"
+                        and "highly_variable" in self.h5_file["/var"].keys()):
                     hvg_mask = self.h5_file["/var/highly_variable"][:]
                     fallback = fallback[hvg_mask]
                 return [_decode(x) for x in fallback]
@@ -467,12 +463,12 @@ class PerturbationDataset(Dataset):
             if has_barcodes:
                 pert_cell_barcode_list[i] = item["pert_cell_barcode"]
                 ctrl_cell_barcode_list[i] = item["ctrl_cell_barcode"]
-
         # Create batch dictionary
         batch_dict = {
             "pert_cell_emb": torch.stack(pert_cell_emb_list),
             "ctrl_cell_emb": torch.stack(ctrl_cell_emb_list),
-            "pert_emb": torch.stack(pert_emb_list),
+            "pert_emb":
+            pert_emb_list,  # torch.stack(pert_emb_list),  # pert_emb_list,   # 
             "pert_name": pert_name_list,
             "cell_type": cell_type_list,
             "cell_type_onehot": torch.stack(cell_type_onehot_list),
@@ -528,9 +524,9 @@ class PerturbationDataset(Dataset):
 
         return batch_dict
 
-    def _register_split_indices(
-        self, split: str, perturbed_indices: np.ndarray, control_indices: np.ndarray
-    ):
+    def _register_split_indices(self, split: str,
+                                perturbed_indices: np.ndarray,
+                                control_indices: np.ndarray):
         """
         Register which cell indices belong to the perturbed vs. control set for
         a given split.
@@ -545,17 +541,15 @@ class PerturbationDataset(Dataset):
         self.split_control_indices[split] |= set(control_indices)
 
         # forward these to the mapping strategy
-        self.mapping_strategy.register_split_indices(
-            self, split, perturbed_indices, control_indices
-        )
+        self.mapping_strategy.register_split_indices(self, split,
+                                                     perturbed_indices,
+                                                     control_indices)
 
     def _find_split_for_idx(self, idx: int) -> str | None:
         """Utility to find which split (train/val/test) this idx belongs to."""
         for s in self.split_perturbed_indices.keys():
-            if (
-                idx in self.split_perturbed_indices[s]
-                or idx in self.split_control_indices[s]
-            ):
+            if (idx in self.split_perturbed_indices[s]
+                    or idx in self.split_control_indices[s]):
                 return s
         return None
 
@@ -650,7 +644,8 @@ class PerturbationDataset(Dataset):
             decoded_barcodes = []
             for barcode in barcodes:
                 if isinstance(barcode, (bytes, bytearray)):
-                    decoded_barcodes.append(barcode.decode("utf-8", errors="ignore"))
+                    decoded_barcodes.append(
+                        barcode.decode("utf-8", errors="ignore"))
                 else:
                     decoded_barcodes.append(str(barcode))
             return np.array(decoded_barcodes, dtype=str)
@@ -662,18 +657,21 @@ class PerturbationDataset(Dataset):
                 decoded_categories = []
                 for cat in barcode_categories:
                     if isinstance(cat, (bytes, bytearray)):
-                        decoded_categories.append(cat.decode("utf-8", errors="ignore"))
+                        decoded_categories.append(
+                            cat.decode("utf-8", errors="ignore"))
                     else:
                         decoded_categories.append(str(cat))
-                return np.array(
-                    [decoded_categories[i] for i in barcode_codes], dtype=str
-                )
+                return np.array([decoded_categories[i] for i in barcode_codes],
+                                dtype=str)
             except KeyError:
                 # If no barcode information is available, generate generic ones
                 logger.warning(
                     f"No cell barcode information found in {self.h5_path}. Generating generic barcodes."
                 )
                 return np.array(
-                    [f"cell_{i:06d}" for i in range(self.metadata_cache.n_cells)],
+                    [
+                        f"cell_{i:06d}"
+                        for i in range(self.metadata_cache.n_cells)
+                    ],
                     dtype=str,
                 )
