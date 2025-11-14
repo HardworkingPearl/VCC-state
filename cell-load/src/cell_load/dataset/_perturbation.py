@@ -16,7 +16,7 @@ from ..utils.data_utils import (
 logger = logging.getLogger(__name__)
 ### TODO: modify below absolute path for the entry
 with h5py.File(
-        "/home/absking/scratch/vcc/state/competition_support_set/hepg2.h5",
+        "/content/drive/MyDrive/VCC/datasets/h5/competition_support_set/hepg2.h5",
         "r") as f:
     gene_base_index = f['var/_index'][:]
 
