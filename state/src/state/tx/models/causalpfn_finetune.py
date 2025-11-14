@@ -80,7 +80,9 @@ class ConfidenceToken(nn.Module):
         # Concatenate along sequence dimension
         return torch.cat([seq_input, confidence_tokens], dim=1)
 
-    def extract_confidence_prediction(self, transformer_output: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+    def extract_confidence_prediction(
+            self, transformer_output: torch.Tensor
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         Extract main output and confidence prediction from transformer output.
 
@@ -96,7 +98,8 @@ class ConfidenceToken(nn.Module):
         confidence_output = transformer_output[:, -1:, :]  # [B, 1, E]
 
         # Project confidence token output to scalar
-        confidence_pred = self.confidence_projection(confidence_output).squeeze(-1)  # [B, 1]
+        confidence_pred = self.confidence_projection(
+            confidence_output).squeeze(-1)  # [B, 1]
 
         return main_output, confidence_pred
 
@@ -153,7 +156,8 @@ class CausalPFNModel(PerturbationModel):
         self.output_space = output_space
         self.n_encoder_layers = kwargs.get("n_encoder_layers", 2)
         self.n_decoder_layers = kwargs.get("n_decoder_layers", 2)
-        self.activation_class = get_activation_class(kwargs.get("activation", "gelu"))
+        self.activation_class = get_activation_class(
+            kwargs.get("activation", "gelu"))
         self.cell_sentence_len = kwargs.get("cell_set_len", 256)
         self.decoder_loss_weight = kwargs.get("decoder_weight", 1.0)
         self.regularization = kwargs.get("regularization", 0.0)
@@ -161,8 +165,10 @@ class CausalPFNModel(PerturbationModel):
 
         self.transformer_backbone_key = transformer_backbone_key
         self.transformer_backbone_kwargs = transformer_backbone_kwargs
-        self.transformer_backbone_kwargs["n_positions"] = self.cell_sentence_len + kwargs.get("extra_tokens", 0)
-        
+        self.transformer_backbone_kwargs[
+            "n_positions"] = self.cell_sentence_len + kwargs.get(
+                "extra_tokens", 0)
+
         self.distributional_loss = distributional_loss
         self.gene_dim = gene_dim
 
@@ -170,13 +176,17 @@ class CausalPFNModel(PerturbationModel):
         blur = kwargs.get("blur", 0.05)
         loss_name = kwargs.get("loss", "energy")
         if loss_name == "energy":
-            self.loss_fn = SamplesLoss(loss=self.distributional_loss, blur=blur)
+            self.loss_fn = SamplesLoss(loss=self.distributional_loss,
+                                       blur=blur)
         elif loss_name == "mse":
             self.loss_fn = nn.MSELoss()
         elif loss_name == "se":
-            sinkhorn_weight = kwargs.get("sinkhorn_weight", 0.01)  # 1/100 = 0.01
+            sinkhorn_weight = kwargs.get("sinkhorn_weight",
+                                         0.01)  # 1/100 = 0.01
             energy_weight = kwargs.get("energy_weight", 1.0)
-            self.loss_fn = CombinedLoss(sinkhorn_weight=sinkhorn_weight, energy_weight=energy_weight, blur=blur)
+            self.loss_fn = CombinedLoss(sinkhorn_weight=sinkhorn_weight,
+                                        energy_weight=energy_weight,
+                                        blur=blur)
         elif loss_name == "sinkhorn":
             self.loss_fn = SamplesLoss(loss="sinkhorn", blur=blur)
         else:
@@ -200,7 +210,8 @@ class CausalPFNModel(PerturbationModel):
 
         # if the model is outputting to counts space, apply relu
         # otherwise its in embedding space and we don't want to
-        is_gene_space = kwargs["embed_key"] == "X_hvg" or kwargs["embed_key"] is None
+        is_gene_space = kwargs["embed_key"] == "X_hvg" or kwargs[
+            "embed_key"] is None
         if is_gene_space or self.gene_decoder is None:
             self.relu = torch.nn.ReLU()
 
@@ -208,11 +219,13 @@ class CausalPFNModel(PerturbationModel):
         self.confidence_token = None
         self.confidence_loss_fn = None
         if kwargs.get("confidence_token", False):
-            self.confidence_token = ConfidenceToken(hidden_dim=self.hidden_dim, dropout=self.dropout)
+            self.confidence_token = ConfidenceToken(hidden_dim=self.hidden_dim,
+                                                    dropout=self.dropout)
             self.confidence_loss_fn = nn.MSELoss()
 
         # Backward-compat: accept legacy key `freeze_pert`
-        self.freeze_pert_backbone = kwargs.get("freeze_pert_backbone", kwargs.get("freeze_pert", False))
+        self.freeze_pert_backbone = kwargs.get(
+            "freeze_pert_backbone", kwargs.get("freeze_pert", False))
         if self.freeze_pert_backbone:
             # Freeze backbone base weights but keep LoRA adapter weights (if present) trainable
             for name, param in self.transformer_backbone.named_parameters():
@@ -233,28 +246,33 @@ class CausalPFNModel(PerturbationModel):
             )
 
         control_pert = kwargs.get("control_pert", "non-targeting")
-        if kwargs.get("finetune_vci_decoder", False):  # TODO: This will go very soon
+        if kwargs.get("finetune_vci_decoder",
+                      False):  # TODO: This will go very soon
             gene_names = []
 
             if output_space == "gene":
                 # hvg's but for which dataset?
                 if "DMSO_TF" in control_pert:
                     gene_names = np.load(
-                        "/large_storage/ctc/userspace/aadduri/datasets/tahoe_19k_to_2k_names.npy", allow_pickle=True
-                    )
+                        "/large_storage/ctc/userspace/aadduri/datasets/tahoe_19k_to_2k_names.npy",
+                        allow_pickle=True)
                 elif "non-targeting" in control_pert:
-                    temp = ad.read_h5ad("/large_storage/ctc/userspace/aadduri/datasets/hvg/replogle/jurkat.h5")
+                    temp = ad.read_h5ad(
+                        "/large_storage/ctc/userspace/aadduri/datasets/hvg/replogle/jurkat.h5"
+                    )
                     # gene_names = temp.var.index.values
             else:
                 assert output_space == "all"
                 if "DMSO_TF" in control_pert:
                     gene_names = np.load(
-                        "/large_storage/ctc/userspace/aadduri/datasets/tahoe_19k_names.npy", allow_pickle=True
-                    )
+                        "/large_storage/ctc/userspace/aadduri/datasets/tahoe_19k_names.npy",
+                        allow_pickle=True)
                 elif "non-targeting" in control_pert:
                     # temp = ad.read_h5ad('/scratch/ctc/ML/vci/paper_replogle/jurkat.h5')
                     # gene_names = temp.var.index.values
-                    temp = ad.read_h5ad("/large_storage/ctc/userspace/aadduri/cross_dataset/replogle/jurkat.h5")
+                    temp = ad.read_h5ad(
+                        "/large_storage/ctc/userspace/aadduri/cross_dataset/replogle/jurkat.h5"
+                    )
                     gene_names = temp.var.index.values
 
             self.gene_decoder = FinetuneVCICountsDecoder(
@@ -269,12 +287,15 @@ class CausalPFNModel(PerturbationModel):
         """
         self.step = 0
         self.models = []
-        self.tabpfn_context_X = nn.Parameter(torch.randn(2048, 512)).to('cuda')  # 18080 + 5120
-        self.tabpfn_context_Y = nn.Parameter(torch.randn(2048, 512)).to('cuda')  # 512
+        self.tabpfn_context_X = nn.Parameter(torch.randn(2048, 512)).to(
+            'cuda')  # 18080 + 5120
+        self.tabpfn_context_Y = nn.Parameter(torch.randn(2048, 512)).to(
+            'cuda')  # 512
         # self.tabpfn_mdl = TabPFNRegressor(device='cuda',ignore_pretraining_limits=True)
-        loaded = np.load("train_data.npz") # np.load("train_data_esm_evo.npz")  #
-        self.datasets = loaded["X_train"]  #  raw dataset input as context 
-        self.targets = loaded["y_train"]   #  
+        loaded = np.load(
+            "train_data.npz")  # np.load("train_data_esm_evo.npz")  #
+        self.datasets = loaded["X_train"]  #  raw dataset input as context
+        self.targets = loaded["y_train"]  #
         self.treatments = torch.from_numpy(loaded["t_train"]).to('cuda')
         causalpfn_cate = CATEEstimator(
             device='cuda',
@@ -283,19 +304,25 @@ class CausalPFNModel(PerturbationModel):
         causalpfn_cate.load_model()
         # self.y_encoder Linear(in_features=1, out_features=384, bias=True)
         # self.encoder Linear(in_features=100, out_features=384, bias=True)
-        self.causalpfn_mdl = causalpfn_cate             # +1 for treatment column in the input
-        self.causalpfn_mdl.icl_model.model.encoder = nn.Linear(self.hidden_dim+1, 384, bias=True, device='cuda')
-        self.causalpfn_mdl.icl_model.model.y_encoder = nn.Linear(self.hidden_dim, 384, bias=True, device='cuda')
-        self.causalpfn_mdl.icl_model.model.head[2] = nn.Linear(768, 672, bias=True, device='cuda')
+        self.causalpfn_mdl = causalpfn_cate  # +1 for treatment column in the input
+        self.causalpfn_mdl.icl_model.model.encoder = nn.Linear(
+            self.hidden_dim + 1, 384, bias=True, device='cuda')
+        self.causalpfn_mdl.icl_model.model.y_encoder = nn.Linear(
+            self.hidden_dim, 384, bias=True, device='cuda')
+        self.causalpfn_mdl.icl_model.model.head[2] = nn.Linear(768,
+                                                               672,
+                                                               bias=True,
+                                                               device='cuda')
         self.causalpfn_mdl.icl_model.model.train()
         # Register the model as a submodule so all its parameters are tracked and optimized
         # This ensures encoder and y_encoder parameters are included in model.parameters()
         self.add_module('causalpfn_model', self.causalpfn_mdl.icl_model.model)
-        
+
         self.causalpfn_mdl.temperature = 1.0
         with open("target_pca_672.pkl", "rb") as f:
             self.target_pca = pickle.load(f)
-        self.targets = torch.from_numpy(self.target_pca.transform(self.targets)).to('cuda').float()
+        self.targets = torch.from_numpy(self.target_pca.transform(
+            self.targets)).to('cuda').float()
         # nn.Linear(18080 + 5120, 18080)
         # self.tabicl_mdl = TabICLClassifier(device='cuda')
         # Project from input_dim to hidden_dim for transformer input
@@ -303,7 +330,7 @@ class CausalPFNModel(PerturbationModel):
         # self.pert_y_encoder = nn.Linear(self.input_dim, 512)  # self.hidden_dim) C*E where C is the number of class tokens, E is the embedding dimension
 
         self.pert_encoder = build_mlp(
-            in_dim=self.pert_dim, # 7040, # 
+            in_dim=self.pert_dim,  # 7040, # 
             out_dim=self.hidden_dim,
             hidden_dim=self.hidden_dim,
             n_layers=self.n_encoder_layers,
@@ -364,7 +391,6 @@ class CausalPFNModel(PerturbationModel):
         """Define how we embed basal state input, if needed."""
         return self.basal_encoder(expr)
 
-
     def forward(self, batch: dict, padded=True) -> torch.Tensor:
         """
         The main forward call. Batch is a flattened sequence of cell sentences,
@@ -378,14 +404,24 @@ class CausalPFNModel(PerturbationModel):
         The `padded` argument here is set to True if the batch is padded. Otherwise, we
         expect a single batch, so that sentences can vary in length across batches.
         """
+        for i, emb in enumerate(batch["pert_emb"]):
+            if emb is None:
+                batch["pert_emb"][i] = torch.zeros(5120, dtype=torch.float32)
+            elif emb.size(0) < 5120:
+                batch["pert_emb"][i] = F.pad(emb, (0, 5120 - emb.size(0)))
+        batch["pert_emb"] = torch.cat(batch["pert_emb"],
+                                      dim=0).float().to('cuda')
+
         if padded:
-            pert = batch["pert_emb"].reshape(-1, self.cell_sentence_len, self.pert_dim)
-            basal = batch["ctrl_cell_emb"].reshape(-1, self.cell_sentence_len, self.input_dim)
+            pert = batch["pert_emb"].reshape(-1, self.cell_sentence_len,
+                                             self.pert_dim)
+            basal = batch["ctrl_cell_emb"].reshape(-1, self.cell_sentence_len,
+                                                   self.input_dim)
         else:
             # we are inferencing on a single batch, so accept variable length sentences
             pert = batch["pert_emb"].reshape(1, -1, self.pert_dim)
             basal = batch["ctrl_cell_emb"].reshape(1, -1, self.input_dim)
-        
+
         # Shape: [B, S, input_dim]
         pert_embedding = self.encode_perturbation(pert)  # 5120 -> 672
         control_cells = self.encode_basal_expression(basal)  # 18080 -> 672
@@ -393,7 +429,7 @@ class CausalPFNModel(PerturbationModel):
         combined_input = pert_embedding + control_cells  # Shape: [B, S, hidden_dim]
         # combined_input = torch.cat((batch["pert_emb"],batch["ctrl_cell_emb"]), 1)
         seq_input = combined_input  # Shape: [B, S, hidden_dim] 672
-        
+
         ########### TODO: this only at step 0:
 
         if self.step == 0:
@@ -404,8 +440,12 @@ class CausalPFNModel(PerturbationModel):
 
             for start in range(0, num_samples, batch_size):
                 end = min(start + batch_size, num_samples)
-                pert_batch = self.encode_perturbation(torch.from_numpy(self.datasets[start:end, self.input_dim:]).to('cuda'))                 
-                control_cells_batch = self.encode_basal_expression(torch.from_numpy(self.datasets[start:end, :self.input_dim]).to('cuda')) 
+                pert_batch = self.encode_perturbation(
+                    torch.from_numpy(
+                        self.datasets[start:end, self.input_dim:]).to('cuda'))
+                control_cells_batch = self.encode_basal_expression(
+                    torch.from_numpy(
+                        self.datasets[start:end, :self.input_dim]).to('cuda'))
                 pert_context.append(pert_batch)
                 control_cells_context.append(control_cells_batch)
 
@@ -415,35 +455,40 @@ class CausalPFNModel(PerturbationModel):
             self.causalpfn_mdl.X_train = combined_input_context.detach()
             self.causalpfn_mdl.t_train = self.treatments
             self.causalpfn_mdl.y_train = self.targets
-        if self.training: 
-            self.step+=1
+        if self.training:
+            self.step += 1
             if self.step == 213:
                 self.step = 0
 
-        treatment = torch.tensor([int(t != 'non-targeting') for t in batch['pert_name']]).to('cuda')
+        treatment = torch.tensor(
+            [int(t != 'non-targeting') for t in batch['pert_name']]).to('cuda')
 
         if self.batch_encoder is not None:
             # Extract batch indices (assume they are integers or convert from one-hot)
             batch_indices = batch["batch"]
 
             # Handle one-hot encoded batch indices
-            if batch_indices.dim() > 1 and batch_indices.size(-1) == self.batch_dim:
+            if batch_indices.dim() > 1 and batch_indices.size(
+                    -1) == self.batch_dim:
                 batch_indices = batch_indices.argmax(-1)
 
             # Reshape batch indices to match sequence structure
             if padded:
-                batch_indices = batch_indices.reshape(-1, self.cell_sentence_len)
+                batch_indices = batch_indices.reshape(-1,
+                                                      self.cell_sentence_len)
             else:
                 batch_indices = batch_indices.reshape(1, -1)
 
             # Get batch embeddings and add to sequence input
-            batch_embeddings = self.batch_encoder(batch_indices.long())  # Shape: [B, S, hidden_dim]
+            batch_embeddings = self.batch_encoder(
+                batch_indices.long())  # Shape: [B, S, hidden_dim]
             seq_input = seq_input + batch_embeddings
 
         confidence_pred = None
         if self.confidence_token is not None:
             # Append confidence token: [B, S, E] -> [B, S+1, E]
-            seq_input = self.confidence_token.append_confidence_token(seq_input)
+            seq_input = self.confidence_token.append_confidence_token(
+                seq_input)
 
         # forward pass + extract CLS last hidden state
         if self.hparams.get("mask_attn", False):  # skip
@@ -453,25 +498,31 @@ class CausalPFNModel(PerturbationModel):
             self.transformer_backbone._attn_implementation = "eager"
 
             # create a [1,1,S,S] mask (now S+1 if confidence token is used)
-            base = torch.eye(seq_length, device=device).view(1, seq_length, seq_length)
+            base = torch.eye(seq_length,
+                             device=device).view(1, seq_length, seq_length)
 
             # repeat out to [B,H,S,S]
             attn_mask = base.repeat(batch_size, 1, 1)
 
-            outputs = self.transformer_backbone(inputs_embeds=seq_input, attention_mask=attn_mask)
+            outputs = self.transformer_backbone(inputs_embeds=seq_input,
+                                                attention_mask=attn_mask)
             transformer_output = outputs.last_hidden_state
-        else:    
+        else:
             seq_input = seq_input.flatten(0, 1)
             preds = self.causalpfn_mdl.estimate_y_pt(seq_input, treatment)
-        output = preds @ torch.from_numpy(self.target_pca.components_).float().to('cuda') + torch.from_numpy(self.target_pca.mean_).float().to('cuda')
+        output = preds @ torch.from_numpy(
+            self.target_pca.components_).float().to('cuda') + torch.from_numpy(
+                self.target_pca.mean_).float().to('cuda')
         # if confidence_pred is not None:
         #     return output, confidence_pred
         # else:
         #     return output
         return self.relu(output)
-        
 
-    def training_step(self, batch: Dict[str, torch.Tensor], batch_idx: int, padded=True) -> torch.Tensor:
+    def training_step(self,
+                      batch: Dict[str, torch.Tensor],
+                      batch_idx: int,
+                      padded=True) -> torch.Tensor:
         """Training step logic for both main model and decoder."""
         # Get model predictions (in latent space)
         confidence_pred = None
@@ -484,16 +535,20 @@ class CausalPFNModel(PerturbationModel):
 
         if padded:
             pred = pred.reshape(-1, self.cell_sentence_len, self.output_dim)
-            target = target.reshape(-1, self.cell_sentence_len, self.output_dim)
+            target = target.reshape(-1, self.cell_sentence_len,
+                                    self.output_dim)
         else:
             pred = pred.reshape(1, -1, self.output_dim)
             target = target.reshape(1, -1, self.output_dim)
 
-        main_loss = self.loss_fn(pred, target).nanmean()  # both: [16, 128, 18080]
+        main_loss = self.loss_fn(pred,
+                                 target).nanmean()  # both: [16, 128, 18080]
         self.log("train_loss", main_loss)
         # Log individual loss components if using combined loss
-        if hasattr(self.loss_fn, "sinkhorn_loss") and hasattr(self.loss_fn, "energy_loss"):
-            sinkhorn_component = self.loss_fn.sinkhorn_loss(pred, target).nanmean()
+        if hasattr(self.loss_fn, "sinkhorn_loss") and hasattr(
+                self.loss_fn, "energy_loss"):
+            sinkhorn_component = self.loss_fn.sinkhorn_loss(pred,
+                                                            target).nanmean()
             energy_component = self.loss_fn.energy_loss(pred, target).nanmean()
             self.log("train/sinkhorn_loss", sinkhorn_component)
             self.log("train/energy_loss", energy_component)
@@ -521,11 +576,15 @@ class CausalPFNModel(PerturbationModel):
             else:
                 pert_cell_counts_preds = self.gene_decoder(latent_preds)
                 if padded:
-                    gene_targets = gene_targets.reshape(-1, self.cell_sentence_len, self.gene_decoder.gene_dim())
+                    gene_targets = gene_targets.reshape(
+                        -1, self.cell_sentence_len,
+                        self.gene_decoder.gene_dim())
                 else:
-                    gene_targets = gene_targets.reshape(1, -1, self.gene_decoder.gene_dim())
+                    gene_targets = gene_targets.reshape(
+                        1, -1, self.gene_decoder.gene_dim())
 
-                decoder_loss = self.loss_fn(pert_cell_counts_preds, gene_targets).mean()
+                decoder_loss = self.loss_fn(pert_cell_counts_preds,
+                                            gene_targets).mean()
 
             # Log decoder loss
             self.log("decoder_loss", decoder_loss)
@@ -538,12 +597,15 @@ class CausalPFNModel(PerturbationModel):
 
             # Ensure proper shapes for confidence loss computation
             if confidence_pred.dim() == 2:  # [B, 1]
-                loss_target = loss_target.unsqueeze(0).expand(confidence_pred.size(0), 1)
+                loss_target = loss_target.unsqueeze(0).expand(
+                    confidence_pred.size(0), 1)
             else:  # confidence_pred is [B,]
-                loss_target = loss_target.unsqueeze(0).expand(confidence_pred.size(0))
+                loss_target = loss_target.unsqueeze(0).expand(
+                    confidence_pred.size(0))
 
             # Compute confidence loss
-            confidence_loss = self.confidence_loss_fn(confidence_pred.squeeze(), loss_target.squeeze())
+            confidence_loss = self.confidence_loss_fn(
+                confidence_pred.squeeze(), loss_target.squeeze())
             self.log("train/confidence_loss", confidence_loss)
             self.log("train/actual_loss", loss_target.mean())
 
@@ -569,7 +631,8 @@ class CausalPFNModel(PerturbationModel):
 
         return total_loss
 
-    def validation_step(self, batch: Dict[str, torch.Tensor], batch_idx: int) -> None:
+    def validation_step(self, batch: Dict[str, torch.Tensor],
+                        batch_idx: int) -> None:
         """Validation step logic."""
         if self.confidence_token is None:
             pred, confidence_pred = self.forward(batch), None
@@ -585,8 +648,10 @@ class CausalPFNModel(PerturbationModel):
         self.log("val_loss", loss)
 
         # Log individual loss components if using combined loss
-        if hasattr(self.loss_fn, "sinkhorn_loss") and hasattr(self.loss_fn, "energy_loss"):
-            sinkhorn_component = self.loss_fn.sinkhorn_loss(pred, target).mean()
+        if hasattr(self.loss_fn, "sinkhorn_loss") and hasattr(
+                self.loss_fn, "energy_loss"):
+            sinkhorn_component = self.loss_fn.sinkhorn_loss(pred,
+                                                            target).mean()
             energy_component = self.loss_fn.energy_loss(pred, target).mean()
             self.log("val/sinkhorn_loss", sinkhorn_component)
             self.log("val/energy_loss", energy_component)
@@ -596,39 +661,42 @@ class CausalPFNModel(PerturbationModel):
         pred_np = pred.detach().cpu().numpy()
         target_np = target.detach().cpu().numpy()
         ctrl_np = ctrl.detach().cpu().numpy()
-        
+
         # Flatten to (total_cells, output_dim)
         pred_flat = pred_np.reshape(-1, self.output_dim)
         target_flat = target_np.reshape(-1, self.output_dim)
         ctrl_flat = ctrl_np.reshape(-1, self.output_dim)
-        
+
         # Compute deltas (perturbation effect = pert - control)
         pred_delta = pred_flat - ctrl_flat
         target_delta = target_flat - ctrl_flat
-        
+
         # MAE: Mean Absolute Error
         mae = np.mean(np.abs(pred_flat - target_flat))
         self.log("val/MAE", mae, prog_bar=True)
-        
+
         # DES: Differential Expression Score (Spearman correlation of deltas)
         # Flatten deltas for correlation computation
         pred_delta_flat = pred_delta.flatten()
         target_delta_flat = target_delta.flatten()
-        
+
         # Remove any NaN or Inf values
-        valid_mask = np.isfinite(pred_delta_flat) & np.isfinite(target_delta_flat)
+        valid_mask = np.isfinite(pred_delta_flat) & np.isfinite(
+            target_delta_flat)
         if np.sum(valid_mask) > 10:  # Need at least 10 valid points
-            des_corr, _ = spearmanr(pred_delta_flat[valid_mask], target_delta_flat[valid_mask])
+            des_corr, _ = spearmanr(pred_delta_flat[valid_mask],
+                                    target_delta_flat[valid_mask])
             if np.isfinite(des_corr):
                 self.log("val/DES", des_corr, prog_bar=True)
             else:
                 self.log("val/DES", 0.0)
         else:
             self.log("val/DES", 0.0)
-        
+
         # PDS: Perturbation Differential Score (Pearson correlation of deltas)
         if np.sum(valid_mask) > 10:
-            pds_corr, _ = pearsonr(pred_delta_flat[valid_mask], target_delta_flat[valid_mask])
+            pds_corr, _ = pearsonr(pred_delta_flat[valid_mask],
+                                   target_delta_flat[valid_mask])
             if np.isfinite(pds_corr):
                 self.log("val/PDS", pds_corr, prog_bar=True)
             else:
@@ -649,11 +717,13 @@ class CausalPFNModel(PerturbationModel):
                 decoder_loss = nb_nll(gene_targets, mu, theta)
             else:
                 # Get decoder predictions
-                pert_cell_counts_preds = self.gene_decoder(latent_preds).reshape(
-                    -1, self.cell_sentence_len, self.gene_decoder.gene_dim()
-                )
-                gene_targets = gene_targets.reshape(-1, self.cell_sentence_len, self.gene_decoder.gene_dim())
-                decoder_loss = self.loss_fn(pert_cell_counts_preds, gene_targets).mean()
+                pert_cell_counts_preds = self.gene_decoder(
+                    latent_preds).reshape(-1, self.cell_sentence_len,
+                                          self.gene_decoder.gene_dim())
+                gene_targets = gene_targets.reshape(
+                    -1, self.cell_sentence_len, self.gene_decoder.gene_dim())
+                decoder_loss = self.loss_fn(pert_cell_counts_preds,
+                                            gene_targets).mean()
 
             # Log the validation metric
             self.log("val/decoder_loss", decoder_loss)
@@ -665,18 +735,22 @@ class CausalPFNModel(PerturbationModel):
 
             # Ensure proper shapes for confidence loss computation
             if confidence_pred.dim() == 2:  # [B, 1]
-                loss_target = loss_target.unsqueeze(0).expand(confidence_pred.size(0), 1)
+                loss_target = loss_target.unsqueeze(0).expand(
+                    confidence_pred.size(0), 1)
             else:  # confidence_pred is [B,]
-                loss_target = loss_target.unsqueeze(0).expand(confidence_pred.size(0))
+                loss_target = loss_target.unsqueeze(0).expand(
+                    confidence_pred.size(0))
 
             # Compute confidence loss
-            confidence_loss = self.confidence_loss_fn(confidence_pred.squeeze(), loss_target.squeeze())
+            confidence_loss = self.confidence_loss_fn(
+                confidence_pred.squeeze(), loss_target.squeeze())
             self.log("val/confidence_loss", confidence_loss)
             self.log("val/actual_loss", loss_target.mean())
 
         return {"loss": loss, "predictions": pred}
 
-    def test_step(self, batch: Dict[str, torch.Tensor], batch_idx: int) -> None:
+    def test_step(self, batch: Dict[str, torch.Tensor],
+                  batch_idx: int) -> None:
         if self.confidence_token is None:
             pred, confidence_pred = self.forward(batch, padded=False), None
         else:
@@ -694,12 +768,15 @@ class CausalPFNModel(PerturbationModel):
 
             # Ensure proper shapes for confidence loss computation
             if confidence_pred.dim() == 2:  # [B, 1]
-                loss_target = loss_target.unsqueeze(0).expand(confidence_pred.size(0), 1)
+                loss_target = loss_target.unsqueeze(0).expand(
+                    confidence_pred.size(0), 1)
             else:  # confidence_pred is [B,]
-                loss_target = loss_target.unsqueeze(0).expand(confidence_pred.size(0))
+                loss_target = loss_target.unsqueeze(0).expand(
+                    confidence_pred.size(0))
 
             # Compute confidence loss
-            confidence_loss = self.confidence_loss_fn(confidence_pred.squeeze(), loss_target.squeeze())
+            confidence_loss = self.confidence_loss_fn(
+                confidence_pred.squeeze(), loss_target.squeeze())
             self.log("test/confidence_loss", confidence_loss)
 
     def predict_step(self, batch, batch_idx, padded=True, **kwargs):
@@ -708,7 +785,8 @@ class CausalPFNModel(PerturbationModel):
          returning 'preds', 'X', 'pert_name', etc.
         """
         if self.confidence_token is None:
-            latent_output = self.forward(batch, padded=padded)  # shape [B, ...]
+            latent_output = self.forward(batch,
+                                         padded=padded)  # shape [B, ...]
             confidence_pred = None
         else:
             latent_output, confidence_pred = self.forward(batch, padded=padded)
