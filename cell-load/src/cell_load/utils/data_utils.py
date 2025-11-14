@@ -103,8 +103,9 @@ class H5MetadataCache:
 
                 if "categories" in pert_ds:
                     self.pert_categories = safe_decode_array(
-                        pert_ds["categories"][:])
-                    self.pert_codes = pert_ds["codes"][:].astype(np.int32)
+                        pert_ds["categories"][:])  # shape (n_cats,)
+                    self.pert_codes = pert_ds["codes"][:].astype(
+                        np.int32)  # shape (n_cells,)
                 else:
                     raw = pert_ds[:]
                     cats, codes = np.unique(raw, return_inverse=True)
@@ -112,32 +113,47 @@ class H5MetadataCache:
                     self.pert_codes = codes.astype(np.int32)
 
                 # ---- Cell type / cell line ----
-                self.cell_type_codes = obs["PCR_plate"]["codes"][:].astype(
+                cell_type_ds = obs["PCR_plate"]
+                self.cell_type_categories = safe_decode_array(
+                    cell_type_ds["categories"][:])
+                self.cell_type_codes = cell_type_ds["codes"][:].astype(
                     np.int32)
-                self.cell_type_categories, self.cell_type_codes = np.unique(
-                    obs[cell_type_key][:], return_inverse=True)
+
+                # ---- Single-gene filter: CATEGORY -> CELL ----
+                single_gene_cat_mask = np.array(
+                    [',' not in str(pname) for pname in self.pert_categories])
+                single_gene_cat_idx = np.where(single_gene_cat_mask)[0]
+
+                # cell-level mask: keep cells whose pert_code points to a single-gene category
+                cell_mask = np.isin(self.pert_codes, single_gene_cat_idx)
+
+                # Apply cell_mask to all per-cell arrays
+                self.pert_codes = self.pert_codes[cell_mask]
+                self.cell_type_codes = self.cell_type_codes[cell_mask]
 
                 # ---- Batch: sample ----
                 batch_ds = obs["sample"]
+
                 if "categories" in batch_ds:
                     self.batch_is_categorical = True
                     self.batch_categories = safe_decode_array(
                         batch_ds["categories"][:])
-                    self.batch_codes = batch_ds["codes"][:].astype(np.int32)
+                    batch_codes = batch_ds["codes"][:].astype(np.int32)
+                    self.batch_codes = batch_codes[cell_mask]
                 else:
                     self.batch_is_categorical = False
                     raw = batch_ds[:]
+                    raw = raw[cell_mask]
                     self.batch_categories = raw.astype(str)
                     self.batch_codes = raw.astype(np.int32)
 
                 # -- Control mask & counts --
-                ctrl = control_pert.decode() if isinstance(
-                    control_pert, bytes) else control_pert
-                idx = np.where(self.pert_categories == ctrl)[0]
+                idx = np.where(self.pert_categories == "NTC")[0]
                 if idx.size == 0:
                     raise ValueError(
-                        f"control_pert='{control_pert}' not found in {pert_col} categories: "
+                        f"control_pert='NTC' not found in {pert_col} categories: "
                         f"{self.pert_categories}")
+
                 self.control_pert_code = int(idx[0])
                 self.control_mask = self.pert_codes == self.control_pert_code
             elif "srivatsam" in h5_path:

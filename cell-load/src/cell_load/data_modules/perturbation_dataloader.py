@@ -434,43 +434,74 @@ class PerturbationDataModule(LightningDataModule):
                     elif dataset_name == "mcfaline":
                         obs = f["obs"]
 
+                        # ---- perturbations (gene_id / treatment) ----
                         if "gene_id" in obs:
                             pert_ds = obs["gene_id"]
                         else:
                             pert_ds = obs["treatment"]
 
                         if "categories" in pert_ds:
-                            pert_arr = pert_ds["categories"][:]
+                            pert_categories = safe_decode_array(
+                                pert_ds["categories"][:])  # (n_cat,)
+                            pert_codes = pert_ds["codes"][:].astype(
+                                np.int32)  # (n_cells,)
                         else:
-                            pert_arr = pert_ds[:]
+                            raw = pert_ds[:]
+                            cats, codes = np.unique(raw, return_inverse=True)
+                            pert_categories = safe_decode_array(cats)
+                            pert_codes = codes.astype(np.int32)
 
-                        perts = set(safe_decode_array(pert_arr))
+                        single_gene_cat_mask = np.array([
+                            ',' not in str(pname) for pname in pert_categories
+                        ])
+                        single_gene_cat_idx = np.where(single_gene_cat_mask)[0]
+
+                        cell_mask = np.isin(pert_codes, single_gene_cat_idx)
+
+                        perts = set(pert_categories[single_gene_cat_mask])
                         all_perts.update(perts)
 
+                        # ---- batches (PCR_plate / sample) ----
                         if "PCR_plate" in obs:
                             batch_ds = obs["PCR_plate"]
                         else:
                             batch_ds = obs["sample"]
 
                         if "categories" in batch_ds:
-                            batch_arr = batch_ds["categories"][:]
-                        else:
-                            batch_arr = batch_ds[:]
+                            batch_categories = safe_decode_array(
+                                batch_ds["categories"][:])
+                            batch_codes = batch_ds["codes"][:].astype(
+                                np.int32)  # (n_cells,)
 
-                        batches = set(safe_decode_array(batch_arr))
+                            valid_batch_codes = batch_codes[cell_mask]
+                            batch_cat_idx = np.unique(valid_batch_codes)
+                            batches = set(batch_categories[batch_cat_idx])
+                        else:
+                            raw = safe_decode_array(batch_ds[:])
+                            batches = set(raw[cell_mask])
+
                         all_batches.update(batches)
 
+                        # ---- cell types (GSC_line), again restricted to single-gene cells ----
                         if "GSC_line" in obs:
                             ct_ds = obs["GSC_line"]
                             if "categories" in ct_ds:
-                                celltype_arr = ct_ds["categories"][:]
+                                ct_categories = safe_decode_array(
+                                    ct_ds["categories"][:])
+                                ct_codes = ct_ds["codes"][:].astype(np.int32)
+
+                                valid_ct_codes = ct_codes[cell_mask]
+                                ct_cat_idx = np.unique(valid_ct_codes)
+                                celltypes = set(ct_categories[ct_cat_idx])
                             else:
-                                celltype_arr = ct_ds[:]
-                            celltypes = set(safe_decode_array(celltype_arr))
+                                raw = safe_decode_array(
+                                    ct_ds[:])  # per-cell values
+                                celltypes = set(raw[cell_mask])
                         else:
                             celltypes = {"A172"}
 
                         all_celltypes.update(celltypes)
+
                     elif dataset_name in ["srivatsam"]:
                         batch_arr = f[f"obs/sample/categories"][:]
                         batches = set(safe_decode_array(batch_arr))
