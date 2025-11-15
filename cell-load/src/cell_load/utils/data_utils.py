@@ -113,11 +113,17 @@ class H5MetadataCache:
                     self.pert_codes = codes.astype(np.int32)
 
                 # ---- Cell type / cell line ----
-                cell_type_ds = obs["PCR_plate"]
-                self.cell_type_categories = safe_decode_array(
-                    cell_type_ds["categories"][:])
-                self.cell_type_codes = cell_type_ds["codes"][:].astype(
-                    np.int32)
+                # Now change all cell types to A172/T98G/U87MG based on filename
+                if "A172" in self.h5_path:
+                    self.cell_type_categories = np.array(["A172"])
+                elif "T98G" in self.h5_path:
+                    self.cell_type_categories = np.array(["T98G"])
+                elif "U87MG" in self.h5_path:
+                    self.cell_type_categories = np.array(["U87MG"])
+                else:
+                    self.cell_type_categories = np.array(["A172"])
+                self.cell_type_codes = np.zeros_like(self.pert_codes,
+                                                     dtype=np.int32)
 
                 # ---- Single-gene filter: CATEGORY -> CELL ----
                 single_gene_cat_mask = np.array(
@@ -132,20 +138,12 @@ class H5MetadataCache:
                 self.cell_type_codes = self.cell_type_codes[cell_mask]
 
                 # ---- Batch: sample ----
-                batch_ds = obs["sample"]
-
-                if "categories" in batch_ds:
-                    self.batch_is_categorical = True
-                    self.batch_categories = safe_decode_array(
-                        batch_ds["categories"][:])
-                    batch_codes = batch_ds["codes"][:].astype(np.int32)
-                    self.batch_codes = batch_codes[cell_mask]
-                else:
-                    self.batch_is_categorical = False
-                    raw = batch_ds[:]
-                    raw = raw[cell_mask]
-                    self.batch_categories = raw.astype(str)
-                    self.batch_codes = raw.astype(np.int32)
+                batch_ds = obs["PCR_plate"]
+                self.batch_is_categorical = True
+                self.batch_categories = safe_decode_array(
+                    batch_ds["categories"][:])
+                batch_codes = batch_ds["codes"][:].astype(np.int32)
+                self.batch_codes = batch_codes[cell_mask]
 
                 # -- Control mask & counts --
                 idx = np.where(self.pert_categories == "NTC")[0]
