@@ -2,7 +2,7 @@ input_dim: 18080
 hidden_dim: 672
 output_dim: 18080
 pert_dim: 5120
-batch_dim: 1622
+batch_dim: 1624
 dropout: 0.1
 lr: 0.0001
 loss_fn: mse

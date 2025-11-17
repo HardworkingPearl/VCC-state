@@ -252,10 +252,11 @@ f['var/id'][:]: array([b'ENSG00000000003.14', b'ENSG00000000005.5', b'ENSG000000
 /scratch/absking/CausalPFN/src/causalpfn/models/model.py
 Q: why same number of perturbed cells and control cells
 
-
+module load python/3.11
 causalFPN: module load StdEnv/2023 gcc/12.3 cuda/12.2
 (vector) absking@klogin01:~/scratch/vcc$ module load faiss/1.7.4
 export PYTHONPATH="/home/absking/scratch/vcc/cell-load/src:$PYTHONPATH"
+export LD_LIBRARY_PATH=/cvmfs/soft.computecanada.ca/easybuild/software/2023/x86-64-v3/CUDA/cuda12.6/cudnn/9.10.0.56/lib:$LD_LIBRARY_PATH
 
 pip install --no-deps huggingface_hub
 
@@ -272,3 +273,80 @@ python -m src.state tx train data.kwargs.toml_config_path="competition_support_s
 python -m src.state tx train data.kwargs.toml_config_path="competition_support_set/starter.toml"   data.kwargs.num_workers=4   data.kwargs.batch_col="batch_var"   data.kwargs.pert_col="target_gene"   data.kwargs.cell_type_key="cell_type"   data.kwargs.control_pert="non-targeting"   data.kwargs.perturbation_features_file="competition_support_set/ESM2_pert_features.pt"   training.max_steps=60000   training.ckpt_every_n_steps=1000 training.val_freq=1000 model=causalpfn   wandb.tags="causalpfn"   output_dir="competition_1"   name="causalpfn_seurat_pbmcs"
 
 python -m src.state tx train data.kwargs.toml_config_path="competition_support_set/starter.toml"   data.kwargs.num_workers=4 data.kwargs.batch_col="batch_var"   data.kwargs.pert_col="target_gene"   data.kwargs.cell_type_key="cell_type"   data.kwargs.control_pert="non-targeting"   data.kwargs.perturbation_features_file="competition_support_set/ESM_pert_features_merged.pt"   training.max_steps=60000   training.ckpt_every_n_steps=1000 training.val_freq=1000 model=causalpfn   wandb.tags="causalpfn"   output_dir="competition_1"   name="causalpfn_seurat_pbmcs"
+
+python -c "import h5py, shutil; shutil.copy('/home/absking/scratch/vcc/state/competition_support_set_ext/Seurat_object_IFNB_Perturb_seq.h5ad', '/home/absking/scratch/vcc/state/competition_support_set_ext/Seurat_object_IFNB_Perturb_seq.h5')"
+
+python -m src.state tx train \
+  data.kwargs.toml_config_path="competition_support_set/starter.toml" \
+  data.kwargs.num_workers=8 \
+  data.kwargs.batch_col="batch_var" \
+  data.kwargs.pert_col="target_gene" \
+  data.kwargs.cell_type_key="cell_type" \
+  data.kwargs.control_pert="non-targeting" \
+  data.kwargs.perturbation_features_file="competition_support_set/ESM2_pert_features_merged.pt" \
+  training.max_steps=60000 \
+  training.ckpt_every_n_steps=1000 \
+  training.val_freq=1000 \
+  model=causalpfn \
+  wandb.tags="causalpfn" \
+  output_dir="competition_2" \
+  name="causalpfn_seurat_pbmcs"
+
+
+  # model.kwargs.init_from="/home/absking/scratch/vcc/state/competition_2/causalpfn/checkpoints/last.ckpt"
+
+
+uv run state tx infer \
+  --output "competition/prediction_test.h5ad" \
+  --model-dir "competition/causalpfn" \
+  --checkpoint "competition/causalpfn/checkpoints/step=17040-v1.ckpt" \
+  --adata "competition_support_set/competition_test_template.h5ad" \
+  --pert-col "target_gene"
+
+python -m src.state tx infer   --output "competition/prediction_test.h5ad"   --model-dir "competition/causalpfn"   --checkpoint "competition/causalpfn/checkpoints/step=17040-v1.ckpt"   --adata "competition_support_set/competition_test_template.h5ad"   --pert-col "target_gene"
+
+uv tool run --from git+https://github.com/ArcInstitute/cell-eval@main cell-eval run \                         
+  -ap competition/prediction_test.h5ad \
+  -ar competition_support_set/competition_test_template.h5ad \
+  --pert-col target_gene \
+  --control-pert non-targeting \
+  --profile full \
+  -o full_evaluation
+
+
+python -m src.state tx train   data.kwargs.toml_config_path="competition_support_set/starter.toml" \
+  data.kwargs.num_workers=8   data.kwargs.batch_col="batch_var"   data.kwargs.pert_col="target_gene"\
+     data.kwargs.cell_type_key="cell_type"   data.kwargs.control_pert="non-targeting"   \
+     data.kwargs.perturbation_features_file="competition_support_set/ESM2_pert_features_merged.pt"  \
+      training.max_steps=60000   training.ckpt_every_n_steps=1000   training.val_freq=1000   model=causalpfn \
+        wandb.tags="causalpfn"   output_dir="competition_2"   name="causalpfn_seurat" \
+        model.kwargs.init_from="/home/absking/scratch/vcc/state/competition_2/causalpfn/checkpoints/last.ckpt"
+
+python -m src.state tx train   data.kwargs.toml_config_path="competition_support_set/starter.toml" \
+  data.kwargs.num_workers=8  data.kwargs.batch_col="batch_var"   data.kwargs.pert_col="target_gene"  \
+   data.kwargs.cell_type_key="cell_type"   data.kwargs.control_pert="non-targeting"   \
+   data.kwargs.perturbation_features_file="competition_support_set/ESM2_pert_features.pt"  \
+    training.max_steps=60000   training.ckpt_every_n_steps=1000   training.val_freq=1000   model=causalpfn \
+      wandb.tags="causalpfn"   output_dir="competition_2"   name="causalpfn_seurat" \
+      model.kwargs.init_from='/home/absking/scratch/vcc/state/competition_2/causalpfn_seurat/checkpoints/step-18000.ckpt'
+
+python -m src.state tx train   data.kwargs.toml_config_path="competition_support_set/starter_original.toml" \
+  data.kwargs.num_workers=8   data.kwargs.batch_col="batch_var"   data.kwargs.pert_col="target_gene"\
+     data.kwargs.cell_type_key="cell_type"   data.kwargs.control_pert="non-targeting"   \
+     data.kwargs.perturbation_features_file="competition_support_set/ESM2_pert_features.pt"  \
+      training.max_steps=60000   training.ckpt_every_n_steps=1000   training.val_freq=1000   model=causalpfn \
+        wandb.tags="causalpfn"   output_dir="competition_0"   name="causalpfn" 
+
+python -m src.state tx infer   --output "competition/prediction_test.h5ad"   --model-dir "competition/causalpfn" \
+  --checkpoint "/home/absking/scratch/vcc/state/competition_0/causalpfn/checkpoints/step=11000.ckpt"   \
+  --adata "competition_support_set/competition_test_template.h5ad"   --pert-col "target_gene" \
+  --tsv competition_support_set/vcc_test_set.tsv --celltype-col cell_type --batch-col batch_var \
+  --control-pert "non-targeting"
+
+python -m src.state tx train   data.kwargs.toml_config_path="competition_support_set/starter_final.toml" \
+  data.kwargs.num_workers=8  data.kwargs.batch_col="batch_var"   data.kwargs.pert_col="target_gene"  \
+   data.kwargs.cell_type_key="cell_type"   data.kwargs.control_pert="non-targeting"   \
+   data.kwargs.perturbation_features_file="competition_support_set/ESM2_pert_features.pt"  \
+    training.max_steps=60000   training.ckpt_every_n_steps=500   training.val_freq=500   model=causalpfn \
+      wandb.tags="causalpfn"   output_dir="competition_final"   name="causalpfn_final" \
+      model.kwargs.init_from='/home/absking/scratch/vcc/state/competition_0/causalpfn/checkpoints/step-11000.ckpt'

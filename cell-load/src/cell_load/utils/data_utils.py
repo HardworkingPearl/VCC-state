@@ -111,7 +111,7 @@ class H5MetadataCache:
                 # -- Codes for pert & cell type --
                 self.pert_codes = obs[pert_col]["codes"][:].astype(np.int32)
                 self.cell_type_codes = obs[cell_type_key]["codes"][:].astype(np.int32)
-                breakpoint()
+                # breakpoint()  # Removed for performance - was causing slowdowns
                 # -- Control mask & counts --
                 idx = np.where(self.pert_categories == control_pert)[0]
                 if idx.size == 0:

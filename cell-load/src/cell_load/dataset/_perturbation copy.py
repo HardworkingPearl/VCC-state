@@ -121,40 +121,13 @@ class PerturbationDataset(Dataset):
         self._x_attrs = dict(self.h5_file["X"].attrs)  # Cache X attributes
         self._x_is_csr = self._x_attrs.get("encoding-type") == "csr_matrix"
         if self._x_is_csr:
-            # Cache dataset references for CSR matrices (avoid repeated HDF5 lookups)
+            # Cache indptr for CSR matrices (used in every fetch_gene_expression call)
             self._x_indptr = self.h5_file["/X/indptr"]
-            self._x_data = self.h5_file["/X/data"]
-            self._x_indices = self.h5_file["/X/indices"]
-        else:
-            # Cache dense X dataset reference
-            self._x_dense = self.h5_file["/X"]
         # Cache var/_index to avoid reading it every time in align_vector_bytes
         try:
             self._var_index = self.h5_file['var/_index'][:]
         except KeyError:
             self._var_index = None
-        
-        # Pre-compute alignment indices ONCE to avoid expensive np.intersect1d in hot path
-        # This is critical for performance - np.intersect1d is O(n log n) and was being called per sample!
-        self._alignment_indices = None
-        if self._var_index is not None:
-            try:
-                # Compute intersection once during init and cache the indices
-                _, idx_base, idx_var = np.intersect1d(gene_base_index, self._var_index, return_indices=True)
-                # Convert to torch tensors for faster indexing (optional but can help)
-                self._alignment_indices = (torch.from_numpy(idx_base), torch.from_numpy(idx_var))
-            except Exception as e:
-                logger.warning(f"Failed to pre-compute alignment indices: {e}. Will use fallback.")
-                self._alignment_indices = None
-        
-        # Cache obsm dataset reference if embed_key is set (most common case)
-        # This avoids repeated path lookups in HDF5 which is slow for compressed files
-        self._obsm_cache = None
-        if self.embed_key:
-            try:
-                self._obsm_cache = self.h5_file[f"/obsm/{self.embed_key}"]
-            except KeyError:
-                self._obsm_cache = None
 
         # Initialize split index containers
         splits = ["train", "train_eval", "val", "test"]
@@ -355,16 +328,16 @@ class PerturbationDataset(Dataset):
         Returns:
             1D FloatTensor of length self.n_genes
         """
-        # Use cached attributes and dataset references instead of reading from HDF5 every time
+        # Use cached attributes instead of reading from HDF5 every time
         if self._x_is_csr:
-            # Use cached dataset references (much faster for h5ad files - avoids path lookups)
+            # Use cached indptr reference
             start_ptr = self._x_indptr[idx]
             end_ptr = self._x_indptr[idx + 1]
             sub_data = torch.tensor(
-                self._x_data[start_ptr:end_ptr], dtype=torch.float32
+                self.h5_file["/X/data"][start_ptr:end_ptr], dtype=torch.float32
             )
             sub_indices = torch.tensor(
-                self._x_indices[start_ptr:end_ptr], dtype=torch.long
+                self.h5_file["/X/indices"][start_ptr:end_ptr], dtype=torch.long
             )
             counts = torch.sparse_csr_tensor(
                 torch.tensor([0], dtype=torch.long),
@@ -374,21 +347,12 @@ class PerturbationDataset(Dataset):
             )
             data = counts.to_dense().squeeze()
         else:
-            # Use cached dense dataset reference
-            row_data = self._x_dense[idx]
+            row_data = self.h5_file["/X"][idx]
             data = torch.tensor(row_data, dtype=torch.float32)
         if len(data) != 18080:
-            # Use pre-computed alignment indices if available (MUCH faster than np.intersect1d per sample)
-            if self._alignment_indices is not None:
-                idx_base, idx_var = self._alignment_indices
-                # Fast path: use pre-computed indices for direct indexing
-                aligned = torch.zeros(gene_base_index.shape[0], dtype=data.dtype, device=data.device)
-                aligned[idx_base] = data[idx_var]
-                data = aligned
-            else:
-                # Fallback: compute alignment on-the-fly (slow but works)
-                var_index = self._var_index if self._var_index is not None else self.h5_file['var/_index'][:]
-                data = align_vector_bytes(data, var_index, gene_base_index)
+            # Use cached var_index instead of reading from HDF5 every time
+            var_index = self._var_index if self._var_index is not None else self.h5_file['var/_index'][:]
+            data = align_vector_bytes(data, var_index, gene_base_index)
         return data
 
     def fetch_obsm_expression(self, idx: int, key: str) -> torch.Tensor:
@@ -401,12 +365,7 @@ class PerturbationDataset(Dataset):
         Returns:
             1D FloatTensor of that embedding
         """
-        # Use cached obsm dataset reference if available (avoids repeated HDF5 path lookups)
-        if self._obsm_cache is not None and key == self.embed_key:
-            row_data = self._obsm_cache[idx]
-        else:
-            # Fallback for other keys or if cache not available
-            row_data = self.h5_file[f"/obsm/{key}"][idx]
+        row_data = self.h5_file[f"/obsm/{key}"][idx]
         return torch.tensor(row_data, dtype=torch.float32)
 
     def get_gene_names(self, output_space="all") -> list[str]:

@@ -402,8 +402,9 @@ class PerturbationDataModule(LightningDataModule):
                     if dataset_name == "pbmcs":  
                         # breakpoint()        
                         batch_arr = f[f"obs/sample/categories"][:]
-                        pert_arr = f['uns/esm2_embeddings'].keys()
-                        perts = set(safe_decode_array(pert_arr))
+                        # Convert HDF5 KeysView to list of strings (much faster than safe_decode_array)
+                        pert_keys = list(f['uns/esm2_embeddings'].keys())
+                        perts = set(pert_keys)
                         all_perts.update(perts)  # pert gene names
                         # Convert HDF5 group to dictionary
                         # h5_embeddings = f['uns/esm2_embeddings']
