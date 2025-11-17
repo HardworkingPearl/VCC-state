@@ -329,6 +329,8 @@ class CausalPFNModel(PerturbationModel):
         # self.project_to_hidden = nn.Linear(self.input_dim, self.hidden_dim)
         # self.pert_y_encoder = nn.Linear(self.input_dim, 512)  # self.hidden_dim) C*E where C is the number of class tokens, E is the embedding dimension
 
+        self.use_meta_bert = False
+
         self.pert_encoder = build_mlp(
             in_dim=self.pert_dim,  # 7040, # 
             out_dim=self.hidden_dim,
